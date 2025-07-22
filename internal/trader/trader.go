@@ -146,7 +146,7 @@ func (t *Trader) ExecuteBuy(ctx context.Context, tokenLaunch *parser.TokenLaunch
 	}
 
 	logrus.WithFields(logrus.Fields{
-		"mint":       tokenLaunch.Mint[:8] + "...",
+		"mint":       tokenLaunch.Mint.String()[:8] + "...",
 		"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
 		"amount":     fmt.Sprintf("%.3f SOL", t.config.BuyAmountSOL),
 		"sol_price":  fmt.Sprintf("$%.2f", t.config.GetCurrentSOLPrice()),
@@ -166,11 +166,11 @@ func (t *Trader) simulateBuy(tokenLaunch *parser.TokenLaunchData, result *TradeR
 	time.Sleep(50 * time.Millisecond)
 
 	result.Success = true
-	result.Signature = "SIMULATION_" + tokenLaunch.Mint[:8]
+	result.Signature = "SIMULATION_" + tokenLaunch.Mint.String()[:8]
 	result.TokenAmount = uint64(t.config.BuyAmountSOL * 1000000)
 
 	logrus.WithFields(logrus.Fields{
-		"mint":      tokenLaunch.Mint[:8] + "...",
+		"mint":      tokenLaunch.Mint.String()[:8] + "...",
 		"signature": result.Signature,
 		"tokens":    result.TokenAmount,
 		"latency":   time.Since(result.Timestamp).Milliseconds(),
@@ -183,11 +183,7 @@ func (t *Trader) simulateBuy(tokenLaunch *parser.TokenLaunchData, result *TradeR
 // It builds a complete swap transaction with associated token account creation,
 // signs it with the trader's wallet, and submits it to the Solana network.
 func (t *Trader) executeRealPumpFunBuy(ctx context.Context, tokenLaunch *parser.TokenLaunchData, result *TradeResult) *TradeResult {
-	mintPubkey, err := solana.PublicKeyFromBase58(tokenLaunch.Mint)
-	if err != nil {
-		result.Error = fmt.Errorf("invalid mint address: %w", err)
-		return result
-	}
+	mintPubkey := tokenLaunch.Mint
 
 	tx, bondingCurve, err := t.buildRealPumpFunSwap(ctx, mintPubkey, tokenLaunch)
 	if err != nil {
@@ -223,7 +219,7 @@ func (t *Trader) executeRealPumpFunBuy(ctx context.Context, tokenLaunch *parser.
 	result.Signature = signature.String()
 
 	logrus.WithFields(logrus.Fields{
-		"mint":         tokenLaunch.Mint[:8] + "...",
+		"mint":         tokenLaunch.Mint.String()[:8] + "...",
 		"signature":    signature.String()[:8] + "...",
 		"bonding_curve": bondingCurve.String()[:8] + "...",
 		"url":          "https://solscan.io/tx/" + signature.String(),

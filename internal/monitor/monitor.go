@@ -174,7 +174,13 @@ func (m *Monitor) receiveStreamData(ctx context.Context, stream pb.Geyser_Subscr
 			// Receive update from stream
 			update, err := stream.Recv()
 			if err != nil {
-				return fmt.Errorf("failed to receive stream update: %w", err)
+				select {
+				case <-ctx.Done():
+					logrus.Info("🛑 Monitor stopping")
+					return nil
+				default:
+					return fmt.Errorf("failed to receive stream update: %w", err)
+				}
 			}
 
 			// Process each transaction in the update

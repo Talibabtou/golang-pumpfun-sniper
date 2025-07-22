@@ -74,11 +74,9 @@ func main() {
 		logrus.Fatalf("Failed to start sniper: %v", err)
 	}
 
-	<-ctx.Done()
-	logrus.Info("✅ All services stopped, shutting down...")
-	
 	time.Sleep(2 * time.Second)
-	logrus.Info("✅ Shutdown complete")
+	<-ctx.Done()
+	logrus.Info("✅ All services stopped, shut down complete")
 }
 
 // startSniper initializes and starts the main sniper pipeline components.
@@ -130,7 +128,7 @@ func startParser(ctx context.Context, rawTxChan <-chan *parser.RawTransaction, t
 	for {
 		select {
 		case <-ctx.Done():
-			logrus.Info("🛑 Parser stopping gracefully")
+			logrus.Info("🛑 Parser stopping")
 			return
 		case rawTx, ok := <-rawTxChan:
 			if !ok {
@@ -159,8 +157,7 @@ func startParser(ctx context.Context, rawTxChan <-chan *parser.RawTransaction, t
 			}
 
 			logrus.WithFields(logrus.Fields{
-				"signature":  rawTx.Signature[:8] + "...",
-				"mint":       tokenLaunch.Mint[:8] + "...",
+				"mint":       tokenLaunch.Mint.String()[:8] + "...",
 				"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
 			}).Info("✅ Token successfully parsed!")
 
@@ -200,7 +197,7 @@ func startTrader(ctx context.Context, tokenChan <-chan *parser.TokenLaunchData, 
 	for {
 		select {
 		case <-ctx.Done():
-			logrus.Info("🛑 Trader stopping gracefully")
+			logrus.Info("🛑 Trader stopping")
 			return
 		case tokenLaunch, ok := <-tokenChan:
 			if !ok {
@@ -210,7 +207,7 @@ func startTrader(ctx context.Context, tokenChan <-chan *parser.TokenLaunchData, 
 			
 			if tokenLaunch.MarketCapUSD < cfg.MinMarketCap {
 				logrus.WithFields(logrus.Fields{
-					"mint":         tokenLaunch.Mint[:8] + "...",
+					"mint":         tokenLaunch.Mint.String()[:8] + "...",
 					"market_cap":   logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
 					"min_required": logger.FormatMarketCap(cfg.MinMarketCap),
 				}).Debug("⏭️  Token skipped: market cap too low")
@@ -218,14 +215,14 @@ func startTrader(ctx context.Context, tokenChan <-chan *parser.TokenLaunchData, 
 			}
 
 			logrus.WithFields(logrus.Fields{
-				"mint":       tokenLaunch.Mint[:8] + "...",
+				"mint":       tokenLaunch.Mint.String()[:8] + "...",
 				"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
 				"sol_price":  fmt.Sprintf("$%.2f", cfg.GetCurrentSOLPrice()),
 			}).Info("🎯 Token eligible for trading!")
 
 			if cfg.SimulateMode {
 				logrus.WithFields(logrus.Fields{
-					"mint":       tokenLaunch.Mint[:8] + "...",
+					"mint":       tokenLaunch.Mint.String()[:8] + "...",
 					"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
 					"would_buy":  fmt.Sprintf("%.3f SOL", cfg.BuyAmountSOL),
 				}).Info("📝 [SIMULATION] Would execute buy order")
@@ -234,14 +231,14 @@ func startTrader(ctx context.Context, tokenChan <-chan *parser.TokenLaunchData, 
 				
 				if result.Success {
 					logrus.WithFields(logrus.Fields{
-						"mint":       tokenLaunch.Mint[:8] + "...",
+						"mint":       tokenLaunch.Mint.String()[:8] + "...",
 						"signature":  result.Signature,
 						"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
 						"latency":    fmt.Sprintf("%dms", time.Since(result.Timestamp).Milliseconds()),
 					}).Info("✅ Trade completed successfully!")
 				} else {
 					logrus.WithFields(logrus.Fields{
-						"mint":       tokenLaunch.Mint[:8] + "...",
+						"mint":       tokenLaunch.Mint.String()[:8] + "...",
 						"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
 						"error":      result.Error,
 					}).Error("❌ Trade failed")

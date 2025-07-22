@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/sirupsen/logrus"
+	"github.com/gagliardetto/solana-go"
 )
 
 func Setup(level string) {
@@ -40,12 +41,12 @@ func FormatMarketCap(marketCap float64) string {
 	}
 }
 
-func LogTokenParsed(mint string, marketCapUSD, solPrice float64) {
+func LogTokenParsed(mint solana.PublicKey, marketCapUSD, solPrice float64) {
 	logrus.WithFields(logrus.Fields{
-		"mint":       mint[:8] + "...",
+		"mint":       mint.String()[:8] + "...",
 		"market_cap": FormatMarketCap(marketCapUSD),
 		"sol_price":  fmt.Sprintf("$%.2f", solPrice),
-	}).Info("🔍 Token parsed")
+	}).Info("�� Token parsed")
 }
 
 func LogTokenSkipped(reason string) {

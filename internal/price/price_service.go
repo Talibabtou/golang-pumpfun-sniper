@@ -82,7 +82,7 @@ func (ps *PriceService) priceUpdateLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			logrus.Info("🛑 SOL price service stopping")
+			logrus.Info("🛑 Price service stopping")
 			return
 		case <-ticker.C:
 			if err := ps.fetchPrice(); err != nil {

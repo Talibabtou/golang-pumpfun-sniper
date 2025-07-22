@@ -13,8 +13,8 @@
 package parser
 
 import (
+	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -28,25 +28,25 @@ import (
 )
 
 // Pump.Fun instruction discriminators (first 8 bytes of instruction data)
-const (
-	CREATE_DISCRIMINATOR = "66063d1201daebea" // create instruction
-	BUY_DISCRIMINATOR    = "66063d1201daebe0" // buy instruction  
-	SELL_DISCRIMINATOR   = "51cdf15e49f9b325" // sell instruction
+var (
+	CREATE_DISCRIMINATOR = []byte{0xea, 0xeb, 0xda, 0x01, 0x12, 0x3d, 0x06, 0x66} // create instruction
+	BUY_DISCRIMINATOR    = []byte{0xe0, 0xeb, 0xda, 0x01, 0x12, 0x3d, 0x06, 0x66} // buy instruction  
+	SELL_DISCRIMINATOR   = []byte{0x25, 0xb3, 0xf9, 0x49, 0x5e, 0xf1, 0xcd, 0x51} // sell instruction
 )
 
 // TokenLaunchData represents parsed Pump.Fun token data
 type TokenLaunchData struct {
-	Mint                  string  `json:"mint"`
-	MarketCapUSD          float64 `json:"market_cap_usd"`
-	VirtualTokenReserves  uint64  `json:"virtual_token_reserves"`
-	VirtualSolReserves    uint64  `json:"virtual_sol_reserves"`
-	TokenAmount           uint64  `json:"token_amount"`
-	SolAmount             uint64  `json:"sol_amount"`
-	BondingCurve          string  `json:"bonding_curve"`
-	User                  string  `json:"user"`
-	Signature             string  `json:"signature"`
-	Timestamp             int64   `json:"timestamp"`
-	InstructionType       string  `json:"instruction_type"`
+	Mint                  solana.PublicKey `json:"mint"`
+	MarketCapUSD          float64          `json:"market_cap_usd"`
+	VirtualTokenReserves  uint64           `json:"virtual_token_reserves"`
+	VirtualSolReserves    uint64           `json:"virtual_sol_reserves"`
+	TokenAmount           uint64           `json:"token_amount"`
+	SolAmount             uint64           `json:"sol_amount"`
+	BondingCurve          solana.PublicKey `json:"bonding_curve"`
+	User                  solana.PublicKey `json:"user"`
+	Signature             string           `json:"signature"`
+	Timestamp             int64            `json:"timestamp"`
+	InstructionType       string           `json:"instruction_type"`
 }
 
 // PumpFunParser handles custom Pump.Fun instruction parsing with manual decoding
@@ -188,7 +188,6 @@ func (p *PumpFunParser) findPumpFunInstructionsManual(decodedTx *solana.Transact
 				
 				programID := accountKeys[instr.ProgramIDIndex]
 				if programID.Equals(p.pumpFunProgram) {
-					// Resolve account keys for inner instruction
 					instrAccounts := make([]solana.PublicKey, len(instr.Accounts))
 					for i, accIdx := range instr.Accounts {
 						if int(accIdx) < len(accountKeys) {
@@ -199,7 +198,7 @@ func (p *PumpFunParser) findPumpFunInstructionsManual(decodedTx *solana.Transact
 					instructions = append(instructions, InstructionData{
 						ProgramID:  programID,
 						Accounts:   instrAccounts,
-						Data:       []byte(instr.Data), // Convert from base58 if needed
+						Data:       instr.Data,
 						InnerInstr: true,
 					})
 				}
@@ -300,24 +299,24 @@ func (p *PumpFunParser) parseInstructionManual(instr InstructionData, decodedTx 
 	}
 
 	// Extract discriminator manually (first 8 bytes)
-	discriminator := hex.EncodeToString(data[:8])
+	discriminator := data[:8]
 	
 	tokenData := &TokenLaunchData{
 		Signature: signature,
 		Timestamp: time.Now().Unix(),
 	}
 
-	// Parse based on instruction type using manual decoding
-	switch discriminator {
-	case CREATE_DISCRIMINATOR:
+	// Parse based on instruction type using manual byte comparison
+	switch {
+	case bytes.Equal(discriminator, CREATE_DISCRIMINATOR):
 		return p.parseCreateInstructionManual(instr, data, tokenData)
-	case BUY_DISCRIMINATOR:
+	case bytes.Equal(discriminator, BUY_DISCRIMINATOR):
 		return p.parseBuyInstructionManual(instr, data, tx, tokenData)
-	case SELL_DISCRIMINATOR:
+	case bytes.Equal(discriminator, SELL_DISCRIMINATOR):
 		return p.parseSellInstructionManual(instr, data, tokenData)
 	default:
-		logrus.WithField("discriminator", discriminator).Debug("Unknown instruction discriminator")
-		return nil, fmt.Errorf("unknown instruction discriminator: %s", discriminator)
+		logrus.WithField("discriminator", fmt.Sprintf("%x", discriminator)).Debug("Unknown instruction discriminator")
+		return nil, fmt.Errorf("unknown instruction discriminator: %x", discriminator)
 	}
 }
 
@@ -330,24 +329,24 @@ func (p *PumpFunParser) parseYellowstoneInstructionManual(instr InstructionData,
 	}
 
 	// Extract discriminator manually (first 8 bytes)
-	discriminator := hex.EncodeToString(data[:8])
+	discriminator := data[:8]
 	
 	tokenData := &TokenLaunchData{
 		Signature: signature,
 		Timestamp: time.Now().Unix(),
 	}
 
-	// Parse based on instruction type using manual decoding
-	switch discriminator {
-	case CREATE_DISCRIMINATOR:
+	// Parse based on instruction type using manual byte comparison
+	switch {
+	case bytes.Equal(discriminator, CREATE_DISCRIMINATOR):
 		return p.parseYellowstoneCreateInstruction(instr, data, tokenData)
-	case BUY_DISCRIMINATOR:
+	case bytes.Equal(discriminator, BUY_DISCRIMINATOR):
 		return p.parseYellowstoneBuyInstruction(instr, data, yellowstoneTx, tokenData)
-	case SELL_DISCRIMINATOR:
+	case bytes.Equal(discriminator, SELL_DISCRIMINATOR):
 		return p.parseYellowstoneSellInstruction(instr, data, tokenData)
 	default:
-		logrus.WithField("discriminator", discriminator).Debug("Unknown instruction discriminator")
-		return nil, fmt.Errorf("unknown instruction discriminator: %s", discriminator)
+		logrus.WithField("discriminator", fmt.Sprintf("%x", discriminator)).Debug("Unknown instruction discriminator")
+		return nil, fmt.Errorf("unknown instruction discriminator: %x", discriminator)
 	}
 }
 
@@ -370,9 +369,9 @@ func (p *PumpFunParser) parseCreateInstructionManual(instr InstructionData, data
 	// 6: metadata
 	// 7: user
 	
-	tokenData.Mint = instr.Accounts[0].String()
-	tokenData.BondingCurve = instr.Accounts[2].String()
-	tokenData.User = instr.Accounts[7].String()
+	tokenData.Mint = instr.Accounts[0]
+	tokenData.BondingCurve = instr.Accounts[2]
+	tokenData.User = instr.Accounts[7]
 
 	// Manual parsing of creation parameters from instruction data
 	if len(data) >= 32 {
@@ -385,10 +384,10 @@ func (p *PumpFunParser) parseCreateInstructionManual(instr InstructionData, data
 	tokenData.MarketCapUSD = p.calculateMarketCapManual(tokenData.VirtualTokenReserves, tokenData.VirtualSolReserves)
 
 	logrus.WithFields(logrus.Fields{
-		"mint":       tokenData.Mint[:8] + "...",
+		"mint":       tokenData.Mint.String()[:8] + "...",
 		"type":       "create",
 		"market_cap": fmt.Sprintf("$%.0f", tokenData.MarketCapUSD),
-		"user":       tokenData.User[:8] + "...",
+		"user":       tokenData.User.String()[:8] + "...",
 	}).Info("🆕 Token creation detected (manual parsing)")
 
 	return tokenData, nil
@@ -402,9 +401,9 @@ func (p *PumpFunParser) parseYellowstoneCreateInstruction(instr InstructionData,
 		return nil, fmt.Errorf("insufficient accounts for create instruction: have %d, need 8", len(instr.Accounts))
 	}
 
-	tokenData.Mint = instr.Accounts[0].String()
-	tokenData.BondingCurve = instr.Accounts[2].String()
-	tokenData.User = instr.Accounts[7].String()
+	tokenData.Mint = instr.Accounts[0]
+	tokenData.BondingCurve = instr.Accounts[2]
+	tokenData.User = instr.Accounts[7]
 
 	// Manual parsing of creation parameters
 	if len(data) >= 32 {
@@ -416,10 +415,10 @@ func (p *PumpFunParser) parseYellowstoneCreateInstruction(instr InstructionData,
 	tokenData.MarketCapUSD = p.calculateMarketCapManual(tokenData.VirtualTokenReserves, tokenData.VirtualSolReserves)
 
 	logrus.WithFields(logrus.Fields{
-		"mint":       tokenData.Mint[:8] + "...",
+		"mint":       tokenData.Mint.String()[:8] + "...",
 		"type":       "create",
 		"market_cap": fmt.Sprintf("$%.0f", tokenData.MarketCapUSD),
-		"user":       tokenData.User[:8] + "...",
+		"user":       tokenData.User.String()[:8] + "...",
 	}).Info("🆕 Token creation detected (Yellowstone parsing)")
 
 	return tokenData, nil
@@ -441,9 +440,9 @@ func (p *PumpFunParser) parseBuyInstructionManual(instr InstructionData, data []
 	// 3: bonding curve
 	// 4: associated bonding curve
 	// 5: user
-	tokenData.Mint = instr.Accounts[2].String()
-	tokenData.BondingCurve = instr.Accounts[3].String()
-	tokenData.User = instr.Accounts[5].String()
+	tokenData.Mint = instr.Accounts[2]
+	tokenData.BondingCurve = instr.Accounts[3]
+	tokenData.User = instr.Accounts[5]
 
 	// Manual parsing of buy parameters from instruction data
 	if len(data) >= 24 {
@@ -467,11 +466,11 @@ func (p *PumpFunParser) parseBuyInstructionManual(instr InstructionData, data []
 	tokenData.MarketCapUSD = p.calculateMarketCapManual(tokenData.VirtualTokenReserves, tokenData.VirtualSolReserves)
 
 	logrus.WithFields(logrus.Fields{
-		"mint":       tokenData.Mint[:8] + "...",
+		"mint":       tokenData.Mint.String()[:8] + "...",
 		"type":       "buy",
 		"sol_amount": fmt.Sprintf("%.3f SOL", float64(tokenData.SolAmount)/1e9),
 		"market_cap": fmt.Sprintf("$%.0f", tokenData.MarketCapUSD),
-		"user":       tokenData.User[:8] + "...",
+		"user":       tokenData.User.String()[:8] + "...",
 	}).Info("🛒 Buy detected (manual parsing)")
 
 	return tokenData, nil
@@ -485,9 +484,9 @@ func (p *PumpFunParser) parseYellowstoneBuyInstruction(instr InstructionData, da
 		return nil, fmt.Errorf("insufficient accounts for buy instruction: have %d, need 6", len(instr.Accounts))
 	}
 
-	tokenData.Mint = instr.Accounts[2].String()
-	tokenData.BondingCurve = instr.Accounts[3].String()
-	tokenData.User = instr.Accounts[5].String()
+	tokenData.Mint = instr.Accounts[2]
+	tokenData.BondingCurve = instr.Accounts[3]
+	tokenData.User = instr.Accounts[5]
 
 	// Manual parsing of buy parameters
 	if len(data) >= 24 {
@@ -503,11 +502,11 @@ func (p *PumpFunParser) parseYellowstoneBuyInstruction(instr InstructionData, da
 	tokenData.MarketCapUSD = p.calculateMarketCapManual(tokenData.VirtualTokenReserves, tokenData.VirtualSolReserves)
 
 	logrus.WithFields(logrus.Fields{
-		"mint":       tokenData.Mint[:8] + "...",
+		"mint":       tokenData.Mint.String()[:8] + "...",
 		"type":       "buy",
 		"sol_amount": fmt.Sprintf("%.3f SOL", float64(tokenData.SolAmount)/1e9),
 		"market_cap": fmt.Sprintf("$%.0f", tokenData.MarketCapUSD),
-		"user":       tokenData.User[:8] + "...",
+		"user":       tokenData.User.String()[:8] + "...",
 	}).Info("🛒 Buy detected (Yellowstone parsing)")
 
 	return tokenData, nil
@@ -522,14 +521,14 @@ func (p *PumpFunParser) parseSellInstructionManual(instr InstructionData, data [
 		return nil, fmt.Errorf("insufficient accounts for sell instruction")
 	}
 
-	tokenData.Mint = instr.Accounts[2].String()
-	tokenData.BondingCurve = instr.Accounts[3].String()
-	tokenData.User = instr.Accounts[5].String()
+	tokenData.Mint = instr.Accounts[2]
+	tokenData.BondingCurve = instr.Accounts[3]
+	tokenData.User = instr.Accounts[5]
 
 	logrus.WithFields(logrus.Fields{
-		"mint": tokenData.Mint[:8] + "...",
+		"mint": tokenData.Mint.String()[:8] + "...",
 		"type": "sell",
-		"user": tokenData.User[:8] + "...",
+		"user": tokenData.User.String()[:8] + "...",
 	}).Debug("💰 Sell detected (manual parsing) - not trading")
 
 	// Return nil for sell instructions as we don't trade on them
@@ -544,14 +543,14 @@ func (p *PumpFunParser) parseYellowstoneSellInstruction(instr InstructionData, d
 		return nil, fmt.Errorf("insufficient accounts for sell instruction")
 	}
 
-	tokenData.Mint = instr.Accounts[2].String()
-	tokenData.BondingCurve = instr.Accounts[3].String()
-	tokenData.User = instr.Accounts[5].String()
+	tokenData.Mint = instr.Accounts[2]
+	tokenData.BondingCurve = instr.Accounts[3]
+	tokenData.User = instr.Accounts[5]
 
 	logrus.WithFields(logrus.Fields{
-		"mint": tokenData.Mint[:8] + "...",
+		"mint": tokenData.Mint.String()[:8] + "...",
 		"type": "sell",
-		"user": tokenData.User[:8] + "...",
+		"user": tokenData.User.String()[:8] + "...",
 	}).Debug("💰 Sell detected (Yellowstone parsing) - not trading")
 
 	// Return nil for sell instructions as we don't trade on them
