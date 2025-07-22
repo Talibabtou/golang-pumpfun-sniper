@@ -16,22 +16,18 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"golang-pumpfun-sniper/internal/config"
+	"golang-pumpfun-sniper/internal/utils"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
-	bin "github.com/gagliardetto/binary"
 	pb "github.com/rpcpool/yellowstone-grpc/examples/golang/proto"
 	"github.com/sirupsen/logrus"
-)
-
-// Pump.Fun instruction discriminators (first 8 bytes of instruction data)
-var (
-	CREATE_DISCRIMINATOR = []byte{0xea, 0xeb, 0xda, 0x01, 0x12, 0x3d, 0x06, 0x66} // create instruction
-	BUY_DISCRIMINATOR    = []byte{0xe0, 0xeb, 0xda, 0x01, 0x12, 0x3d, 0x06, 0x66} // buy instruction  
-	SELL_DISCRIMINATOR   = []byte{0x25, 0xb3, 0xf9, 0x49, 0x5e, 0xf1, 0xcd, 0x51} // sell instruction
 )
 
 // TokenLaunchData represents parsed Pump.Fun token data
@@ -47,6 +43,53 @@ type TokenLaunchData struct {
 	Signature             string           `json:"signature"`
 	Timestamp             int64            `json:"timestamp"`
 	InstructionType       string           `json:"instruction_type"`
+	Name                  string           `json:"name"`
+	Symbol                string           `json:"symbol"`
+}
+
+// InstructionData represents a parsed instruction for manual processing
+type InstructionData struct {
+	ProgramID   solana.PublicKey
+	Accounts    []solana.PublicKey
+	Data        []byte
+	InnerInstr  bool
+}
+
+// BondingCurveState represents bonding curve data for manual parsing
+type BondingCurveState struct {
+	VirtualSolReserves   uint64
+	VirtualTokenReserves uint64
+}
+
+// RawTransaction represents a transaction from monitor for manual processing
+type RawTransaction struct {
+	Signature   string
+	Transaction interface{}
+}
+
+// AnchorEventData represents parsed anchor program event data
+type AnchorEventData struct {
+	Mint                 solana.PublicKey
+	VirtualSolReserves   uint64
+	VirtualTokenReserves uint64
+	User                 solana.PublicKey
+	IsBuy                bool
+}
+
+// CreateTokenEventData represents CREATE token data from anchor program events
+type CreateTokenEventData struct {
+	Mint                 solana.PublicKey
+	Name                 string
+	Symbol               string
+	URI                  string
+	BondingCurve         string
+	User                 solana.PublicKey
+	Creator              solana.PublicKey
+	VirtualSolReserves   uint64
+	VirtualTokenReserves uint64
+	RealTokenReserves    uint64
+	TokenTotalSupply     uint64
+	Timestamp            uint64
 }
 
 // PumpFunParser handles custom Pump.Fun instruction parsing with manual decoding
@@ -71,38 +114,12 @@ func (p *PumpFunParser) ParseTransaction(rawTx *RawTransaction) (*TokenLaunchDat
 		return nil, fmt.Errorf("transaction is nil")
 	}
 
-	// Handle Yellowstone transaction format
+	// Only handle Yellowstone transaction format (remove RPC legacy support)
 	if yellowstoneTx, ok := rawTx.Transaction.(*pb.SubscribeUpdateTransaction); ok {
 		return p.parseYellowstoneTransaction(yellowstoneTx, rawTx.Signature)
 	}
 
-	// Handle RPC transaction format (legacy)
-	tx, ok := rawTx.Transaction.(*rpc.GetTransactionResult)
-	if !ok {
-		return nil, fmt.Errorf("unsupported transaction format")
-	}
-
-	// Get the binary transaction data for manual parsing
-	txBinary := tx.Transaction.GetBinary()
-	if txBinary == nil {
-		return nil, fmt.Errorf("failed to get transaction binary data")
-	}
-
-	// Decode the transaction manually
-	decodedTx, err := solana.TransactionFromDecoder(bin.NewBinDecoder(txBinary))
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode transaction: %w", err)
-	}
-
-	// Find Pump.Fun instructions using manual parsing
-	pumpFunInstructions := p.findPumpFunInstructionsManual(decodedTx, tx)
-	if len(pumpFunInstructions) == 0 {
-		return nil, fmt.Errorf("no Pump.Fun instructions found")
-	}
-
-	// Parse the main instruction manually
-	instruction := pumpFunInstructions[0]
-	return p.parseInstructionManual(instruction, decodedTx, tx, rawTx.Signature)
+	return nil, fmt.Errorf("unsupported transaction format - only Yellowstone supported")
 }
 
 // parseYellowstoneTransaction handles Yellowstone gRPC transaction format
@@ -111,7 +128,6 @@ func (p *PumpFunParser) parseYellowstoneTransaction(yellowstoneTx *pb.SubscribeU
 		return nil, fmt.Errorf("invalid Yellowstone transaction structure")
 	}
 
-	// Extract transaction data from Yellowstone format
 	txInfo := yellowstoneTx.Transaction
 	transaction := txInfo.Transaction
 	
@@ -119,94 +135,17 @@ func (p *PumpFunParser) parseYellowstoneTransaction(yellowstoneTx *pb.SubscribeU
 		return nil, fmt.Errorf("no signature in Yellowstone transaction")
 	}
 
-	// Check if we have a message with instructions
 	if transaction.Message == nil || len(transaction.Message.Instructions) == 0 {
 		return nil, fmt.Errorf("no instructions in Yellowstone transaction")
 	}
 
-	// Find Pump.Fun instructions manually from the transaction message
 	pumpFunInstructions := p.findPumpFunInstructionsFromMessage(transaction.Message)
 	if len(pumpFunInstructions) == 0 {
 		return nil, fmt.Errorf("no Pump.Fun instructions found in Yellowstone transaction")
 	}
 
-	// Parse the main instruction manually
 	instruction := pumpFunInstructions[0]
 	return p.parseYellowstoneInstructionManual(instruction, transaction.Message, yellowstoneTx, signature)
-}
-
-// InstructionData represents a parsed instruction for manual processing
-type InstructionData struct {
-	ProgramID   solana.PublicKey
-	Accounts    []solana.PublicKey
-	Data        []byte
-	InnerInstr  bool
-}
-
-// findPumpFunInstructionsManual locates Pump.Fun program instructions with manual parsing
-func (p *PumpFunParser) findPumpFunInstructionsManual(decodedTx *solana.Transaction, tx *rpc.GetTransactionResult) []InstructionData {
-	var instructions []InstructionData
-
-	if decodedTx.Message.Instructions == nil {
-		return instructions
-	}
-
-	accountKeys := decodedTx.Message.AccountKeys
-
-	// Check main instructions manually
-	for _, instr := range decodedTx.Message.Instructions {
-		if int(instr.ProgramIDIndex) >= len(accountKeys) {
-			continue
-		}
-		
-		programID := accountKeys[instr.ProgramIDIndex]
-		if programID.Equals(p.pumpFunProgram) {
-			// Resolve account keys for this instruction
-			instrAccounts := make([]solana.PublicKey, len(instr.Accounts))
-			for i, accIdx := range instr.Accounts {
-				if int(accIdx) < len(accountKeys) {
-					instrAccounts[i] = accountKeys[accIdx]
-				}
-			}
-
-			instructions = append(instructions, InstructionData{
-				ProgramID:  programID,
-				Accounts:   instrAccounts,
-				Data:       instr.Data,
-				InnerInstr: false,
-			})
-		}
-	}
-
-	// Check inner instructions manually using transaction meta
-	if tx.Meta != nil && tx.Meta.InnerInstructions != nil {
-		for _, inner := range tx.Meta.InnerInstructions {
-			for _, instr := range inner.Instructions {
-				if int(instr.ProgramIDIndex) >= len(accountKeys) {
-					continue
-				}
-				
-				programID := accountKeys[instr.ProgramIDIndex]
-				if programID.Equals(p.pumpFunProgram) {
-					instrAccounts := make([]solana.PublicKey, len(instr.Accounts))
-					for i, accIdx := range instr.Accounts {
-						if int(accIdx) < len(accountKeys) {
-							instrAccounts[i] = accountKeys[accIdx]
-						}
-					}
-
-					instructions = append(instructions, InstructionData{
-						ProgramID:  programID,
-						Accounts:   instrAccounts,
-						Data:       instr.Data,
-						InnerInstr: true,
-					})
-				}
-			}
-		}
-	}
-
-	return instructions
 }
 
 // findPumpFunInstructionsFromMessage locates Pump.Fun program instructions from Yellowstone message
@@ -217,14 +156,11 @@ func (p *PumpFunParser) findPumpFunInstructionsFromMessage(message *pb.Message) 
 		return instructions
 	}
 
-	// Check each instruction in the message
 	for _, instr := range message.Instructions {
-		// Check if this instruction's program index points to our Pump.Fun program
 		if int(instr.ProgramIdIndex) >= len(message.AccountKeys) {
 			continue
 		}
 		
-		// Get the program ID from the account keys
 		programKeyBytes := message.AccountKeys[instr.ProgramIdIndex]
 		if len(programKeyBytes) != 32 {
 			continue
@@ -232,7 +168,6 @@ func (p *PumpFunParser) findPumpFunInstructionsFromMessage(message *pb.Message) 
 		programID := solana.PublicKey(programKeyBytes)
 		
 		if programID.Equals(p.pumpFunProgram) {
-			// Resolve account keys for this instruction
 			instrAccounts := make([]solana.PublicKey, len(instr.Accounts))
 			for i, accIdx := range instr.Accounts {
 				if int(accIdx) < len(message.AccountKeys) && len(message.AccountKeys[accIdx]) == 32 {
@@ -252,75 +187,7 @@ func (p *PumpFunParser) findPumpFunInstructionsFromMessage(message *pb.Message) 
 	return instructions
 }
 
-// findPumpFunInstructionsYellowstone locates Pump.Fun program instructions from Yellowstone transaction
-func (p *PumpFunParser) findPumpFunInstructionsYellowstone(decodedTx *solana.Transaction, yellowstoneTx *pb.SubscribeUpdateTransaction) []InstructionData {
-	var instructions []InstructionData
-
-	if decodedTx.Message.Instructions == nil {
-		return instructions
-	}
-
-	accountKeys := decodedTx.Message.AccountKeys
-
-	// Check main instructions manually
-	for _, instr := range decodedTx.Message.Instructions {
-		if int(instr.ProgramIDIndex) >= len(accountKeys) {
-			continue
-		}
-		
-		programID := accountKeys[instr.ProgramIDIndex]
-		if programID.Equals(p.pumpFunProgram) {
-			// Resolve account keys for this instruction
-			instrAccounts := make([]solana.PublicKey, len(instr.Accounts))
-			for i, accIdx := range instr.Accounts {
-				if int(accIdx) < len(accountKeys) {
-					instrAccounts[i] = accountKeys[accIdx]
-				}
-			}
-
-			instructions = append(instructions, InstructionData{
-				ProgramID:  programID,
-				Accounts:   instrAccounts,
-				Data:       instr.Data,
-				InnerInstr: false,
-			})
-		}
-	}
-
-	return instructions
-}
-
-// parseInstructionManual extracts data from a Pump.Fun instruction using manual decoding
-func (p *PumpFunParser) parseInstructionManual(instr InstructionData, decodedTx *solana.Transaction, tx *rpc.GetTransactionResult, signature string) (*TokenLaunchData, error) {
-	data := instr.Data
-	
-	if len(data) < 8 {
-		return nil, fmt.Errorf("instruction data too short: %d bytes", len(data))
-	}
-
-	// Extract discriminator manually (first 8 bytes)
-	discriminator := data[:8]
-	
-	tokenData := &TokenLaunchData{
-		Signature: signature,
-		Timestamp: time.Now().Unix(),
-	}
-
-	// Parse based on instruction type using manual byte comparison
-	switch {
-	case bytes.Equal(discriminator, CREATE_DISCRIMINATOR):
-		return p.parseCreateInstructionManual(instr, data, tokenData)
-	case bytes.Equal(discriminator, BUY_DISCRIMINATOR):
-		return p.parseBuyInstructionManual(instr, data, tx, tokenData)
-	case bytes.Equal(discriminator, SELL_DISCRIMINATOR):
-		return p.parseSellInstructionManual(instr, data, tokenData)
-	default:
-		logrus.WithField("discriminator", fmt.Sprintf("%x", discriminator)).Debug("Unknown instruction discriminator")
-		return nil, fmt.Errorf("unknown instruction discriminator: %x", discriminator)
-	}
-}
-
-// parseYellowstoneInstructionManual extracts data from a Pump.Fun instruction using Yellowstone format
+// parseYellowstoneInstructionManual extracts discriminators and focuses on CREATE only
 func (p *PumpFunParser) parseYellowstoneInstructionManual(instr InstructionData, message *pb.Message, yellowstoneTx *pb.SubscribeUpdateTransaction, signature string) (*TokenLaunchData, error) {
 	data := instr.Data
 	
@@ -328,150 +195,59 @@ func (p *PumpFunParser) parseYellowstoneInstructionManual(instr InstructionData,
 		return nil, fmt.Errorf("instruction data too short: %d bytes", len(data))
 	}
 
-	// Extract discriminator manually (first 8 bytes)
 	discriminator := data[:8]
 	
-	tokenData := &TokenLaunchData{
-		Signature: signature,
-		Timestamp: time.Now().Unix(),
+	logrus.WithFields(logrus.Fields{
+		"signature":     signature[:8] + "...",
+		"discriminator": fmt.Sprintf("%x", discriminator),
+		"data_length":   len(data),
+		"account_count": len(instr.Accounts),
+	}).Debug("🔍 Discriminator detected")
+	
+	if bytes.Equal(discriminator, p.config.DiscriminatorCreate) {
+		logrus.WithField("signature", signature[:8]+"...").Info("🆕 Found CREATE instruction")
+		return p.parseCreateInstructionManual(instr, data, signature)
 	}
-
-	// Parse based on instruction type using manual byte comparison
-	switch {
-	case bytes.Equal(discriminator, CREATE_DISCRIMINATOR):
-		return p.parseYellowstoneCreateInstruction(instr, data, tokenData)
-	case bytes.Equal(discriminator, BUY_DISCRIMINATOR):
-		return p.parseYellowstoneBuyInstruction(instr, data, yellowstoneTx, tokenData)
-	case bytes.Equal(discriminator, SELL_DISCRIMINATOR):
-		return p.parseYellowstoneSellInstruction(instr, data, tokenData)
-	default:
-		logrus.WithField("discriminator", fmt.Sprintf("%x", discriminator)).Debug("Unknown instruction discriminator")
-		return nil, fmt.Errorf("unknown instruction discriminator: %x", discriminator)
+	
+	instructionType := "unknown"
+	if bytes.Equal(discriminator, p.config.DiscriminatorBuy) {
+		instructionType = "buy"
+	} else if bytes.Equal(discriminator, p.config.DiscriminatorSell) {
+		instructionType = "sell"
+	} else if bytes.Equal(discriminator, p.config.DiscriminatorMigration) {
+		instructionType = "migration"
 	}
+	
+	logrus.WithFields(logrus.Fields{
+		"signature": signature[:8] + "...",
+		"type":      instructionType,
+	}).Debug("🔄 Non-CREATE instruction - skipping")
+	
+	return nil, fmt.Errorf("%s instruction - only processing CREATE", instructionType)
 }
 
 // parseCreateInstructionManual handles token creation events with manual decoding
-func (p *PumpFunParser) parseCreateInstructionManual(instr InstructionData, data []byte, tokenData *TokenLaunchData) (*TokenLaunchData, error) {
-	tokenData.InstructionType = "create"
-	
-	// Manually extract accounts for create instruction
+func (p *PumpFunParser) parseCreateInstructionManual(instr InstructionData, data []byte, signature string) (*TokenLaunchData, error) {
 	if len(instr.Accounts) < 8 {
 		return nil, fmt.Errorf("insufficient accounts for create instruction: have %d, need 8", len(instr.Accounts))
 	}
 
-	// Manual account layout for create instruction:
-	// 0: mint
-	// 1: mint authority  
-	// 2: bonding curve
-	// 3: associated bonding curve
-	// 4: global
-	// 5: mpl token metadata
-	// 6: metadata
-	// 7: user
-	
-	tokenData.Mint = instr.Accounts[0]
-	tokenData.BondingCurve = instr.Accounts[2]
-	tokenData.User = instr.Accounts[7]
-
-	// Manual parsing of creation parameters from instruction data
-	if len(data) >= 32 {
-		// Pump.Fun token creation initializes with standard reserves
-		tokenData.VirtualSolReserves = 30 * 1e9      // 30 SOL initial
-		tokenData.VirtualTokenReserves = 1073000000 * 1e6 // ~1.073B tokens initial
+	tokenData := &TokenLaunchData{
+		Mint:            instr.Accounts[0],
+		BondingCurve:    instr.Accounts[2],
+		User:            instr.Accounts[7],
+		Signature:       signature,
+		Timestamp:       time.Now().Unix(),
+		InstructionType: "create",
 	}
 
-	// Calculate initial market cap manually
-	tokenData.MarketCapUSD = p.calculateMarketCapManual(tokenData.VirtualTokenReserves, tokenData.VirtualSolReserves)
-
-	logrus.WithFields(logrus.Fields{
-		"mint":       tokenData.Mint.String()[:8] + "...",
-		"type":       "create",
-		"market_cap": fmt.Sprintf("$%.0f", tokenData.MarketCapUSD),
-		"user":       tokenData.User.String()[:8] + "...",
-	}).Info("🆕 Token creation detected (manual parsing)")
-
-	return tokenData, nil
-}
-
-// parseYellowstoneCreateInstruction handles token creation events from Yellowstone
-func (p *PumpFunParser) parseYellowstoneCreateInstruction(instr InstructionData, data []byte, tokenData *TokenLaunchData) (*TokenLaunchData, error) {
-	tokenData.InstructionType = "create"
-	
-	if len(instr.Accounts) < 8 {
-		return nil, fmt.Errorf("insufficient accounts for create instruction: have %d, need 8", len(instr.Accounts))
-	}
-
-	tokenData.Mint = instr.Accounts[0]
-	tokenData.BondingCurve = instr.Accounts[2]
-	tokenData.User = instr.Accounts[7]
-
-	// Manual parsing of creation parameters
 	if len(data) >= 32 {
 		tokenData.VirtualSolReserves = 30 * 1e9
 		tokenData.VirtualTokenReserves = 1073000000 * 1e6
 	}
 
-	// Calculate initial market cap manually
-	tokenData.MarketCapUSD = p.calculateMarketCapManual(tokenData.VirtualTokenReserves, tokenData.VirtualSolReserves)
-
-	logrus.WithFields(logrus.Fields{
-		"mint":       tokenData.Mint.String()[:8] + "...",
-		"type":       "create",
-		"market_cap": fmt.Sprintf("$%.0f", tokenData.MarketCapUSD),
-		"user":       tokenData.User.String()[:8] + "...",
-	}).Info("🆕 Token creation detected (Yellowstone parsing)")
-
-	return tokenData, nil
-}
-
-// parseBuyInstructionManual handles buy/swap events with manual decoding
-func (p *PumpFunParser) parseBuyInstructionManual(instr InstructionData, data []byte, tx *rpc.GetTransactionResult, tokenData *TokenLaunchData) (*TokenLaunchData, error) {
-	tokenData.InstructionType = "buy"
-	
-	// Manually extract accounts for buy instruction
-	if len(instr.Accounts) < 6 {
-		return nil, fmt.Errorf("insufficient accounts for buy instruction: have %d, need 6", len(instr.Accounts))
-	}
-
-	// Manual account layout for buy instruction:
-	// 0: global
-	// 1: fee recipient
-	// 2: mint
-	// 3: bonding curve
-	// 4: associated bonding curve
-	// 5: user
-	tokenData.Mint = instr.Accounts[2]
-	tokenData.BondingCurve = instr.Accounts[3]
-	tokenData.User = instr.Accounts[5]
-
-	// Manual parsing of buy parameters from instruction data
-	if len(data) >= 24 {
-		// Buy instruction data layout: [discriminator:8][sol_amount:8][min_tokens:8]
-		tokenData.SolAmount = binary.LittleEndian.Uint64(data[8:16])
-		tokenData.TokenAmount = binary.LittleEndian.Uint64(data[16:24])
-	}
-
-	// Extract bonding curve state manually from transaction logs
-	bondingCurveData := p.extractBondingCurveStateManual(tx)
-	if bondingCurveData != nil {
-		tokenData.VirtualSolReserves = bondingCurveData.VirtualSolReserves
-		tokenData.VirtualTokenReserves = bondingCurveData.VirtualTokenReserves
-	} else {
-		// Fallback: estimate from transaction context for manual parsing
-		tokenData.VirtualSolReserves = 50 * 1e9       // Estimated based on typical trades
-		tokenData.VirtualTokenReserves = 800_000_000 * 1e6 // Estimated
-	}
-
-	// Calculate market cap manually
-	tokenData.MarketCapUSD = p.calculateMarketCapManual(tokenData.VirtualTokenReserves, tokenData.VirtualSolReserves)
-
-	logrus.WithFields(logrus.Fields{
-		"mint":       tokenData.Mint.String()[:8] + "...",
-		"type":       "buy",
-		"sol_amount": fmt.Sprintf("%.3f SOL", float64(tokenData.SolAmount)/1e9),
-		"market_cap": fmt.Sprintf("$%.0f", tokenData.MarketCapUSD),
-		"user":       tokenData.User.String()[:8] + "...",
-	}).Info("🛒 Buy detected (manual parsing)")
+	tokenData.MarketCapUSD = p.calculateMarketCap(tokenData.VirtualTokenReserves, tokenData.VirtualSolReserves)
+	p.logTokenCreation(tokenData)
 
 	return tokenData, nil
 }
@@ -488,51 +264,25 @@ func (p *PumpFunParser) parseYellowstoneBuyInstruction(instr InstructionData, da
 	tokenData.BondingCurve = instr.Accounts[3]
 	tokenData.User = instr.Accounts[5]
 
-	// Manual parsing of buy parameters
 	if len(data) >= 24 {
 		tokenData.SolAmount = binary.LittleEndian.Uint64(data[8:16])
 		tokenData.TokenAmount = binary.LittleEndian.Uint64(data[16:24])
 	}
 
-	// Estimate reserves from transaction context
 	tokenData.VirtualSolReserves = 50 * 1e9
 	tokenData.VirtualTokenReserves = 800_000_000 * 1e6
-
-	// Calculate market cap manually
-	tokenData.MarketCapUSD = p.calculateMarketCapManual(tokenData.VirtualTokenReserves, tokenData.VirtualSolReserves)
+	tokenData.MarketCapUSD = p.calculateMarketCap(tokenData.VirtualTokenReserves, tokenData.VirtualSolReserves)
 
 	logrus.WithFields(logrus.Fields{
-		"mint":       tokenData.Mint.String()[:8] + "...",
-		"type":       "buy",
-		"sol_amount": fmt.Sprintf("%.3f SOL", float64(tokenData.SolAmount)/1e9),
+		"token":      tokenData.Mint.String(),
 		"market_cap": fmt.Sprintf("$%.0f", tokenData.MarketCapUSD),
+		"sol_amount": fmt.Sprintf("%.6f SOL", float64(tokenData.SolAmount)/1e9),
+		"solscan":    "https://solscan.io/token/" + tokenData.Mint.String(),
+		"tx":         "https://solscan.io/tx/" + tokenData.Signature,
 		"user":       tokenData.User.String()[:8] + "...",
-	}).Info("🛒 Buy detected (Yellowstone parsing)")
+	}).Info("🛒 TOKEN BUY DETECTED!")
 
 	return tokenData, nil
-}
-
-// parseSellInstructionManual handles sell events with manual decoding
-func (p *PumpFunParser) parseSellInstructionManual(instr InstructionData, data []byte, tokenData *TokenLaunchData) (*TokenLaunchData, error) {
-	tokenData.InstructionType = "sell"
-	
-	// Manual parsing of sell instruction (we don't trade on sells, but parse for completeness)
-	if len(instr.Accounts) < 6 {
-		return nil, fmt.Errorf("insufficient accounts for sell instruction")
-	}
-
-	tokenData.Mint = instr.Accounts[2]
-	tokenData.BondingCurve = instr.Accounts[3]
-	tokenData.User = instr.Accounts[5]
-
-	logrus.WithFields(logrus.Fields{
-		"mint": tokenData.Mint.String()[:8] + "...",
-		"type": "sell",
-		"user": tokenData.User.String()[:8] + "...",
-	}).Debug("💰 Sell detected (manual parsing) - not trading")
-
-	// Return nil for sell instructions as we don't trade on them
-	return nil, fmt.Errorf("sell instruction - not a trading opportunity")
 }
 
 // parseYellowstoneSellInstruction handles sell events from Yellowstone
@@ -551,15 +301,212 @@ func (p *PumpFunParser) parseYellowstoneSellInstruction(instr InstructionData, d
 		"mint": tokenData.Mint.String()[:8] + "...",
 		"type": "sell",
 		"user": tokenData.User.String()[:8] + "...",
-	}).Debug("💰 Sell detected (Yellowstone parsing) - not trading")
+	}).Debug("💰 Sell detected - not trading")
 
-	// Return nil for sell instructions as we don't trade on them
 	return nil, fmt.Errorf("sell instruction - not a trading opportunity")
+}
+
+// calculateMarketCap calculates market cap from reserves
+func (p *PumpFunParser) calculateMarketCap(virtualTokenReserves, virtualSolReserves uint64) float64 {
+	if virtualTokenReserves == 0 {
+		return 0
+	}
+
+	totalSupply := 1_000_000_000.0
+	solPrice := p.config.PriceService.GetPrice()
+	
+	solReservesFloat := float64(virtualSolReserves) / 1e9
+	tokenReservesFloat := float64(virtualTokenReserves) / 1e6
+	
+	if tokenReservesFloat == 0 {
+		return 0
+	}
+	
+	pricePerToken := solReservesFloat / tokenReservesFloat
+	marketCap := pricePerToken * totalSupply * solPrice
+	
+	return marketCap
+}
+
+// calculateMarketCapFromReserves calculates market cap from reserves with total supply
+func (p *PumpFunParser) calculateMarketCapFromReserves(virtualSolReserves, virtualTokenReserves, tokenTotalSupply uint64) float64 {
+	if virtualTokenReserves == 0 || tokenTotalSupply == 0 {
+		return 0
+	}
+	
+	solReserves := float64(virtualSolReserves) / 1e9
+	tokenReserves := float64(virtualTokenReserves) / 1e6
+	totalSupply := float64(tokenTotalSupply) / 1e6
+	
+	pricePerToken := solReserves / tokenReserves
+	solPrice := p.config.PriceService.GetPrice()
+	marketCap := pricePerToken * totalSupply * solPrice
+	
+	return marketCap
+}
+
+// extractAnchorEventData extracts real market data from anchor program events
+func (p *PumpFunParser) extractAnchorEventData(yellowstoneTx *pb.SubscribeUpdateTransaction) *AnchorEventData {
+	if yellowstoneTx.Transaction == nil || yellowstoneTx.Transaction.Meta == nil {
+		return nil
+	}
+
+	meta := yellowstoneTx.Transaction.Meta
+	if meta.LogMessages == nil {
+		return nil
+	}
+
+	for _, logMsg := range meta.LogMessages {
+		if eventData := p.parseAnchorEventFromLog(logMsg); eventData != nil {
+			return eventData
+		}
+	}
+
+	return nil
+}
+
+// parseAnchorEventFromLog parses anchor program event data from log messages
+func (p *PumpFunParser) parseAnchorEventFromLog(logMsg string) *AnchorEventData {
+	if !strings.Contains(logMsg, "mint") && !strings.Contains(logMsg, "virtualSolReserves") {
+		return nil
+	}
+
+	eventData := &AnchorEventData{}
+	
+	if mintMatch := regexp.MustCompile(`"mint":\s*"([A-Za-z0-9]{44})"`).FindStringSubmatch(logMsg); len(mintMatch) > 1 {
+		if mint, err := solana.PublicKeyFromBase58(mintMatch[1]); err == nil {
+			eventData.Mint = mint
+		}
+	}
+	
+	if solMatch := regexp.MustCompile(`"virtualSolReserves":\s*"(\d+)"`).FindStringSubmatch(logMsg); len(solMatch) > 1 {
+		if reserves, err := strconv.ParseUint(solMatch[1], 10, 64); err == nil {
+			eventData.VirtualSolReserves = reserves
+		}
+	}
+	
+	if tokenMatch := regexp.MustCompile(`"virtualTokenReserves":\s*"(\d+)"`).FindStringSubmatch(logMsg); len(tokenMatch) > 1 {
+		if reserves, err := strconv.ParseUint(tokenMatch[1], 10, 64); err == nil {
+			eventData.VirtualTokenReserves = reserves
+		}
+	}
+	
+	if userMatch := regexp.MustCompile(`"user":\s*"([A-Za-z0-9]{44})"`).FindStringSubmatch(logMsg); len(userMatch) > 1 {
+		if user, err := solana.PublicKeyFromBase58(userMatch[1]); err == nil {
+			eventData.User = user
+		}
+	}
+	
+	if buyMatch := regexp.MustCompile(`"isBuy":\s*(true|false)`).FindStringSubmatch(logMsg); len(buyMatch) > 1 {
+		eventData.IsBuy = buyMatch[1] == "true"
+	}
+	
+	if !eventData.Mint.IsZero() && eventData.VirtualSolReserves > 0 && eventData.VirtualTokenReserves > 0 {
+		return eventData
+	}
+	
+	return nil
+}
+
+// extractCreateTokenData extracts CREATE token data from anchor program events
+func (p *PumpFunParser) extractCreateTokenData(yellowstoneTx *pb.SubscribeUpdateTransaction) (*CreateTokenEventData, error) {
+	if yellowstoneTx.Transaction == nil || yellowstoneTx.Transaction.Meta == nil {
+		return nil, fmt.Errorf("no transaction metadata")
+	}
+
+	meta := yellowstoneTx.Transaction.Meta
+	if meta.LogMessages == nil {
+		return nil, fmt.Errorf("no log messages")
+	}
+
+	for _, logMsg := range meta.LogMessages {
+		if createData := p.parseCreateEventFromLog(logMsg); createData != nil {
+			return createData, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no CREATE anchor event data found")
+}
+
+// parseCreateEventFromLog parses CREATE anchor program event data from log messages
+func (p *PumpFunParser) parseCreateEventFromLog(logMsg string) *CreateTokenEventData {
+	if !strings.Contains(logMsg, "mint") || !strings.Contains(logMsg, "virtualSolReserves") {
+		return nil
+	}
+
+	createData := &CreateTokenEventData{}
+	
+	regexMatches := map[string]*regexp.Regexp{
+		"mint":                 regexp.MustCompile(`"mint":\s*"([A-Za-z0-9]{44})"`),
+		"name":                 regexp.MustCompile(`"name":\s*"([^"]+)"`),
+		"symbol":               regexp.MustCompile(`"symbol":\s*"([^"]+)"`),
+		"uri":                  regexp.MustCompile(`"uri":\s*"([^"]+)"`),
+		"bondingCurve":         regexp.MustCompile(`"bondingCurve":\s*"([A-Za-z0-9]{44})"`),
+		"user":                 regexp.MustCompile(`"user":\s*"([A-Za-z0-9]{44})"`),
+		"creator":              regexp.MustCompile(`"creator":\s*"([A-Za-z0-9]{44})"`),
+		"virtualSolReserves":   regexp.MustCompile(`"virtualSolReserves":\s*"(\d+)"`),
+		"virtualTokenReserves": regexp.MustCompile(`"virtualTokenReserves":\s*"(\d+)"`),
+		"realTokenReserves":    regexp.MustCompile(`"realTokenReserves":\s*"(\d+)"`),
+		"tokenTotalSupply":     regexp.MustCompile(`"tokenTotalSupply":\s*"(\d+)"`),
+		"timestamp":            regexp.MustCompile(`"timestamp":\s*"(\d+)"`),
+	}
+	
+	for field, regex := range regexMatches {
+		if match := regex.FindStringSubmatch(logMsg); len(match) > 1 {
+			switch field {
+			case "mint":
+				if mint, err := solana.PublicKeyFromBase58(match[1]); err == nil {
+					createData.Mint = mint
+				}
+			case "name":
+				createData.Name = match[1]
+			case "symbol":
+				createData.Symbol = match[1]
+			case "uri":
+				createData.URI = match[1]
+			case "bondingCurve":
+				createData.BondingCurve = match[1]
+			case "user":
+				if user, err := solana.PublicKeyFromBase58(match[1]); err == nil {
+					createData.User = user
+				}
+			case "creator":
+				if creator, err := solana.PublicKeyFromBase58(match[1]); err == nil {
+					createData.Creator = creator
+				}
+			case "virtualSolReserves":
+				if reserves, err := strconv.ParseUint(match[1], 10, 64); err == nil {
+					createData.VirtualSolReserves = reserves
+				}
+			case "virtualTokenReserves":
+				if reserves, err := strconv.ParseUint(match[1], 10, 64); err == nil {
+					createData.VirtualTokenReserves = reserves
+				}
+			case "realTokenReserves":
+				if reserves, err := strconv.ParseUint(match[1], 10, 64); err == nil {
+					createData.RealTokenReserves = reserves
+				}
+			case "tokenTotalSupply":
+				if supply, err := strconv.ParseUint(match[1], 10, 64); err == nil {
+					createData.TokenTotalSupply = supply
+				}
+			case "timestamp":
+				if timestamp, err := strconv.ParseUint(match[1], 10, 64); err == nil {
+					createData.Timestamp = timestamp
+				}
+			}
+		}
+	}
+	
+	if !createData.Mint.IsZero() && createData.VirtualSolReserves > 0 && createData.VirtualTokenReserves > 0 && createData.Name != "" && createData.Symbol != "" {
+		return createData
+	}
+	
+	return nil
 }
 
 // extractBondingCurveStateManual attempts to extract bonding curve data from logs manually
 func (p *PumpFunParser) extractBondingCurveStateManual(tx *rpc.GetTransactionResult) *BondingCurveState {
-	// Manual parsing of transaction logs for bonding curve state updates
 	if tx.Meta == nil || tx.Meta.LogMessages == nil {
 		return nil
 	}
@@ -575,51 +522,30 @@ func (p *PumpFunParser) extractBondingCurveStateManual(tx *rpc.GetTransactionRes
 
 // parseBondingCurveLogManual extracts bonding curve data from program logs manually
 func (p *PumpFunParser) parseBondingCurveLogManual(log string) *BondingCurveState {
-	// Manual parsing of Pump.Fun program logs for bonding curve updates
-	// This implementation decodes the actual log data without external libraries
-	
-	// Look for specific log patterns that indicate bonding curve state changes
-	// This would need to be expanded based on the actual log format from Pump.Fun
-	
-	// For now, return nil and use fallback estimation
-	// In production, this would manually parse the hex-encoded log data
 	return nil
 }
 
-// calculateMarketCapManual computes market cap manually from bonding curve data
-func (p *PumpFunParser) calculateMarketCapManual(virtualTokenReserves, virtualSolReserves uint64) float64 {
-	if virtualTokenReserves == 0 {
-		return 0
-	}
-
-	// Manual Pump.Fun bonding curve formula implementation:
-	// price = virtualSolReserves / virtualTokenReserves
-	// marketCap = price * totalSupply * solPrice
-	
-	totalSupply := 1_000_000_000.0 // 1B tokens standard for Pump.Fun
-	solPrice := p.config.GetCurrentSOLPrice()
-	
-	solReservesFloat := float64(virtualSolReserves) / 1e9      // Convert lamports to SOL manually
-	tokenReservesFloat := float64(virtualTokenReserves) / 1e6  // Convert to standard decimals manually
-	
-	if tokenReservesFloat == 0 {
-		return 0
+// logTokenCreation logs token creation with nice formatting
+func (p *PumpFunParser) logTokenCreation(token *TokenLaunchData) {
+	var marketCapStr string
+	if token.MarketCapUSD >= 1000000 {
+		marketCapStr = fmt.Sprintf("$%.1fM", token.MarketCapUSD/1000000)
+	} else if token.MarketCapUSD >= 1000 {
+		marketCapStr = fmt.Sprintf("$%.1fK", token.MarketCapUSD/1000)
+	} else {
+		marketCapStr = fmt.Sprintf("$%.0f", token.MarketCapUSD)
 	}
 	
-	pricePerToken := solReservesFloat / tokenReservesFloat
-	marketCap := pricePerToken * totalSupply * solPrice
+	sanitizedToken := utils.SanitizeWalletAddress(token.Mint.String())
+	sanitizedCreator := utils.SanitizeWalletAddress(token.User.String())
 	
-	return marketCap
-}
-
-// BondingCurveState represents bonding curve data for manual parsing
-type BondingCurveState struct {
-	VirtualSolReserves   uint64
-	VirtualTokenReserves uint64
-}
-
-// RawTransaction represents a transaction from monitor for manual processing
-type RawTransaction struct {
-	Signature   string
-	Transaction interface{}
+	logrus.WithFields(logrus.Fields{
+		"token":      sanitizedToken,
+		"name":       token.Name,
+		"symbol":     token.Symbol,
+		"market_cap": marketCapStr,
+		"creator":    sanitizedCreator,
+		"solscan":    "https://solscan.io/token/" + token.Mint.String(),
+		"tx":         "https://solscan.io/tx/" + token.Signature,
+	}).Info("🆕 NEW TOKEN CREATED!")
 }

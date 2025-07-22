@@ -218,24 +218,19 @@ func (m *Monitor) processTransactionUpdate(ctx context.Context, txUpdate *pb.Sub
 		return fmt.Errorf("no signature found in transaction")
 	}
 
-	logrus.WithFields(logrus.Fields{
-		"signature": signature[:8] + "...",
-		"slot":      txUpdate.Slot,
-		"is_vote":   tx.IsVote,
-	}).Info("🎯 Pump.Fun transaction detected via Yellowstone")
-
 	// Convert Yellowstone transaction to our format for manual parsing
 	rawTx := &parser.RawTransaction{
 		Signature:   signature,
 		Transaction: m.convertYellowstoneTransaction(txUpdate),
 	}
 
-	// Send to parser
+	// Send to parser - let the parser determine if it's relevant
 	select {
 	case rawTxChan <- rawTx:
-		logrus.WithField("signature", signature[:8]+"...").Debug("📤 Sent Yellowstone transaction to parser")
+		// Only log successful sends, not every transaction
+		logrus.WithField("signature", signature[:8]+"...").Debug("📤 Sent transaction to parser")
 	case <-time.After(10 * time.Millisecond):
-		logrus.Warn("🚫 Raw transaction channel full, dropping Yellowstone transaction")
+		logrus.WithField("signature", signature[:8]+"...").Warn("🚫 Raw transaction channel full, dropping transaction")
 	case <-ctx.Done():
 		return nil
 	}

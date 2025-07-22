@@ -76,3 +76,8 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// SanitizeAddress is an alias for SanitizeWalletAddress
+func SanitizeAddress(address string) string {
+	return SanitizeWalletAddress(address)
+}

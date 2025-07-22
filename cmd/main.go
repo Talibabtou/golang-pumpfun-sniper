@@ -24,6 +24,7 @@ import (
 	"golang-pumpfun-sniper/internal/logger"
 	"golang-pumpfun-sniper/internal/monitor"
 	"golang-pumpfun-sniper/internal/parser"
+	"golang-pumpfun-sniper/internal/tracker"
 	"golang-pumpfun-sniper/internal/trader"
 
 	"github.com/sirupsen/logrus"
@@ -80,16 +81,17 @@ func main() {
 }
 
 // startSniper initializes and starts the main sniper pipeline components.
-// It creates communication channels between monitor, parser, and trader,
+// It creates communication channels between monitor, parser, tracker, and trader,
 // then starts each component in separate goroutines.
 //
 // The pipeline flow:
-// Monitor (WebSocket) -> RawTransaction -> Parser -> TokenLaunchData -> Trader
+// Monitor -> Parser -> Tracker -> Trader
 //
 // Returns an error if any component fails to initialize.
 func startSniper(ctx context.Context, cfg *config.Config) error {
 	rawTxChan := make(chan *parser.RawTransaction, 500)
 	tokenChan := make(chan *parser.TokenLaunchData, 100)
+	tradeChan := make(chan *parser.TokenLaunchData, 50)
 
 	pumpMonitor, err := monitor.NewMonitor(cfg)
 	if err != nil {
@@ -106,24 +108,20 @@ func startSniper(ctx context.Context, cfg *config.Config) error {
 	pumpParser := parser.NewPumpFunParser(cfg)
 	go startParser(ctx, rawTxChan, tokenChan, pumpParser, cfg)
 
-	go startTrader(ctx, tokenChan, cfg)
+	tokenTracker := tracker.NewTokenTracker(cfg, pumpParser, tradeChan)
+	tokenTracker.Start(ctx)
+	go startTokenRouter(ctx, tokenChan, tradeChan, tokenTracker, cfg)
 
-	logrus.Info("🚀 Sniper pipeline started: Monitor → Parser → Trader")
+	go startTrader(ctx, tradeChan, cfg)
+
+	logrus.Info("🚀 Sniper pipeline started: Monitor → Parser → Tracker → Trader")
 	return nil
 }
 
 // startParser processes raw transactions from the monitor and extracts
 // token launch data for qualifying Pump.Fun transactions.
-//
-// It continuously reads from rawTxChan, parses each transaction,
-// and forwards valid token launches to tokenChan for trading evaluation.
-//
-// The parser tracks transaction count and provides detailed logging
-// for debugging and monitoring purposes.
 func startParser(ctx context.Context, rawTxChan <-chan *parser.RawTransaction, tokenChan chan<- *parser.TokenLaunchData, pumpParser *parser.PumpFunParser, cfg *config.Config) {
 	defer close(tokenChan)
-	
-	transactionCount := 0
 	
 	for {
 		select {
@@ -136,18 +134,12 @@ func startParser(ctx context.Context, rawTxChan <-chan *parser.RawTransaction, t
 				return
 			}
 			
-			transactionCount++
-			logrus.WithFields(logrus.Fields{
-				"signature": rawTx.Signature[:8] + "...",
-				"count":     transactionCount,
-			}).Info("🔍 Parsing transaction")
-			
 			tokenLaunch, err := pumpParser.ParseTransaction(rawTx)
 			if err != nil {
 				logrus.WithFields(logrus.Fields{
 					"signature": rawTx.Signature[:8] + "...",
 					"error":     err.Error(),
-				}).Debug("Failed to parse transaction")
+				}).Debug("Transaction not relevant for trading")
 				continue
 			}
 
@@ -156,18 +148,60 @@ func startParser(ctx context.Context, rawTxChan <-chan *parser.RawTransaction, t
 				continue
 			}
 
-			logrus.WithFields(logrus.Fields{
-				"mint":       tokenLaunch.Mint.String()[:8] + "...",
-				"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
-			}).Info("✅ Token successfully parsed!")
-
 			select {
 			case tokenChan <- tokenLaunch:
-				logger.LogTokenParsed(tokenLaunch.Mint, tokenLaunch.MarketCapUSD, cfg.GetCurrentSOLPrice())
 			case <-time.After(10 * time.Millisecond):
-				logrus.Info("⚠️  Token channel busy, skipping token")
+				logrus.WithField("token", tokenLaunch.Mint.String()[:8]+"...").Warn("⚠️  Token channel busy, skipping token")
 			case <-ctx.Done():
+				logrus.Info("🛑 Parser stopping during token send")
 				return
+			}
+		}
+	}
+}
+
+// startTokenRouter routes tokens between parser and tracker/trader based on type and market cap.
+func startTokenRouter(ctx context.Context, tokenChan <-chan *parser.TokenLaunchData, tradeChan chan<- *parser.TokenLaunchData, tracker *tracker.TokenTracker, cfg *config.Config) {
+	defer close(tradeChan)
+	
+	for {
+		select {
+		case <-ctx.Done():
+			logrus.Info("🛑 Token router stopping")
+			return
+		case tokenLaunch, ok := <-tokenChan:
+			if !ok {
+				logrus.Info("🛑 Token router input channel closed")
+				return
+			}
+			
+			switch tokenLaunch.InstructionType {
+			case "create":
+				tracker.AddToken(tokenLaunch)
+				
+			case "buy":
+				if tracker.ProcessBuyTransaction(tokenLaunch) {
+					continue
+				}
+				
+				if tokenLaunch.MarketCapUSD >= cfg.MinMarketCap {
+					logrus.WithFields(logrus.Fields{
+						"mint":       tokenLaunch.Mint.String()[:8] + "...",
+						"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
+						"sol_price":  fmt.Sprintf("$%.2f", cfg.GetCurrentSOLPrice()),
+					}).Info("🎯 Non-tracked token above threshold - sending to trader")
+					
+					select {
+					case tradeChan <- tokenLaunch:
+					case <-time.After(10 * time.Millisecond):
+						logrus.WithField("token", tokenLaunch.Mint.String()[:8]+"...").Warn("⚠️  Trade channel busy, skipping high-value token")
+					case <-ctx.Done():
+						return
+					}
+				}
+				
+			case "sell":
+				logrus.WithField("mint", tokenLaunch.Mint.String()[:8]+"...").Debug("💸 Sell detected - not trading")
 			}
 		}
 	}

@@ -316,10 +316,8 @@ func (t *Trader) findBondingCurveAccount(mint solana.PublicKey) (solana.PublicKe
 func (t *Trader) buildSwapInstructionData(solAmount, minTokens uint64) []byte {
 	data := make([]byte, 24)
 	
-	discriminator := t.config.BuyInstructionDiscriminator
-	for i := 0; i < 8; i++ {
-		data[i] = byte(discriminator >> (8 * i))
-	}
+	discriminator := t.config.DiscriminatorBuy
+	copy(data[0:8], discriminator)
 	
 	for i := 0; i < 8; i++ {
 		data[8+i] = byte(solAmount >> (8 * i))

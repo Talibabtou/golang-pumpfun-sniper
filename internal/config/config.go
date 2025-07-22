@@ -1,9 +1,11 @@
 package config
 
 import (
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang-pumpfun-sniper/internal/price"
@@ -39,7 +41,12 @@ type Config struct {
 	PumpFunProgramID             string
 	GlobalAccount                string
 	FeeRecipient                 string
-	BuyInstructionDiscriminator  uint64
+	
+	// Pump.Fun Instruction Discriminators
+	DiscriminatorSell      []byte
+	DiscriminatorBuy       []byte
+	DiscriminatorCreate    []byte
+	DiscriminatorMigration []byte
 	
 	// Market Cap Calculation Settings
 	TotalSupply   float64
@@ -78,9 +85,14 @@ func Load() (*Config, error) {
 	
 	// Pump.Fun configuration
 	config.PumpFunProgramID = getEnv("PUMP_FUN_PROGRAM_ID", "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
-	config.GlobalAccount = getEnv("GLOBAL_ACCOUNT", "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5db6SJn7TDx3PSu")
+	config.GlobalAccount = getEnv("GLOBAL_ACCOUNT", "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf")
 	config.FeeRecipient = getEnv("FEE_RECIPIENT", "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV1W2mYkQ8JDKX9E")
-	config.BuyInstructionDiscriminator = getEnvUint64("BUY_INSTRUCTION_DISCRIMINATOR", 16927863322537952870)
+	
+	// Discriminators - parse hex strings from environment to byte slices
+	config.DiscriminatorSell = parseHexRequired("DISCRIMINATOR_SELL")
+	config.DiscriminatorBuy = parseHexRequired("DISCRIMINATOR_BUY") 
+	config.DiscriminatorCreate = parseHexRequired("DISCRIMINATOR_CREATE")
+	config.DiscriminatorMigration = parseHexRequired("DISCRIMINATOR_MIGRATION")
 	
 	// Market cap calculation settings
 	config.TotalSupply = getEnvFloat("TOTAL_SUPPLY", 1000000000) // 1 billion tokens (typical)
@@ -188,4 +200,23 @@ func getEnvUint64(key string, defaultValue uint64) uint64 {
 		logrus.Warnf("Invalid uint64 value for %s: %s, using default: %d", key, value, defaultValue)
 	}
 	return defaultValue
+}
+
+// parseHexRequired parses a required hex string from environment variable into byte slice
+func parseHexRequired(key string) []byte {
+	hexStr := getEnvRequired(key)
+	// Remove 0x prefix if present
+	hexStr = strings.TrimPrefix(hexStr, "0x")
+	
+	// Parse hex string to bytes
+	bytes, err := hex.DecodeString(hexStr)
+	if err != nil {
+		logrus.Fatalf("Invalid hex value for %s: %s, error: %v", key, hexStr, err)
+	}
+	
+	if len(bytes) != 8 {
+		logrus.Fatalf("Discriminator %s must be exactly 8 bytes, got %d bytes", key, len(bytes))
+	}
+	
+	return bytes
 }
