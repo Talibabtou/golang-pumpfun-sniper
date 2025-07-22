@@ -6,6 +6,9 @@ import (
 	"strconv"
 	"time"
 
+	"golang-pumpfun-sniper/internal/price"
+	"golang-pumpfun-sniper/internal/utils"
+
 	"github.com/joho/godotenv"
 	"github.com/sirupsen/logrus"
 )
@@ -33,7 +36,16 @@ type Config struct {
 	LogLevel       string
 	
 	// Pump.Fun Configuration
-	PumpFunProgramID string
+	PumpFunProgramID             string
+	GlobalAccount                string
+	FeeRecipient                 string
+	BuyInstructionDiscriminator  uint64
+	
+	// Market Cap Calculation Settings
+	TotalSupply   float64
+	
+	// Price Service
+	PriceService *price.PriceService
 	
 	// Runtime flags
 	SimulateMode bool
@@ -66,6 +78,15 @@ func Load() (*Config, error) {
 	
 	// Pump.Fun configuration
 	config.PumpFunProgramID = getEnv("PUMP_FUN_PROGRAM_ID", "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
+	config.GlobalAccount = getEnv("GLOBAL_ACCOUNT", "4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5db6SJn7TDx3PSu")
+	config.FeeRecipient = getEnv("FEE_RECIPIENT", "CebN5WGQ4jvEPvsVU4EoHEpgzq1VV1W2mYkQ8JDKX9E")
+	config.BuyInstructionDiscriminator = getEnvUint64("BUY_INSTRUCTION_DISCRIMINATOR", 16927863322537952870)
+	
+	// Market cap calculation settings
+	config.TotalSupply = getEnvFloat("TOTAL_SUPPLY", 1000000000) // 1 billion tokens (typical)
+	
+	// Initialize price service
+	config.PriceService = price.NewPriceService()
 	
 	// Validate configuration
 	if err := config.Validate(); err != nil {
@@ -105,6 +126,23 @@ func (c *Config) GetTimeout() time.Duration {
 	return time.Duration(c.TimeoutSeconds) * time.Second
 }
 
+// GetCurrentSOLPrice returns the current SOL price
+func (c *Config) GetCurrentSOLPrice() float64 {
+	return c.PriceService.GetPrice()
+}
+
+// LogConfig logs the current configuration
+func (c *Config) LogConfig() {
+	logrus.WithFields(logrus.Fields{
+		"rpc_endpoint":    utils.SanitizeURL(c.RPCEndpoint),
+		"grpc_endpoint":   utils.SanitizeURL(c.GRPCEndpoint),
+		"private_key":     utils.SanitizePrivateKey(c.PrivateKey),
+		"buy_amount":      fmt.Sprintf("%.3f SOL", c.BuyAmountSOL),
+		"min_market_cap":  fmt.Sprintf("$%.0f", c.MinMarketCap),
+		"simulate_mode":   c.SimulateMode,
+	}).Info("📋 Configuration loaded")
+}
+
 // Helper functions for environment variable handling
 
 func getEnvRequired(key string) string {
@@ -138,6 +176,16 @@ func getEnvFloat(key string, defaultValue float64) float64 {
 			return floatVal
 		}
 		logrus.Warnf("Invalid float value for %s: %s, using default: %f", key, value, defaultValue)
+	}
+	return defaultValue
+}
+
+func getEnvUint64(key string, defaultValue uint64) uint64 {
+	if value := os.Getenv(key); value != "" {
+		if uint64Val, err := strconv.ParseUint(value, 10, 64); err == nil {
+			return uint64Val
+		}
+		logrus.Warnf("Invalid uint64 value for %s: %s, using default: %d", key, value, defaultValue)
 	}
 	return defaultValue
 }

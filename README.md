@@ -1,61 +1,82 @@
 # 🤖 Golang Pump.Fun Sniper Bot
 
-A high-performance, low-latency sniper bot for Pump.Fun new token launches built in Go. This bot monitors new token mints via Geyser GRPC, filters by market cap, and automatically executes buy transactions with minimal latency.
+A high-performance, low-latency sniper bot for Pump.Fun new token launches built in Go. This bot monitors new token mints via WebSocket RPC, filters by market cap, and automatically executes buy transactions with minimal latency.
 
 ## 🎯 Project Overview
 
 This bot implements a complete workflow for sniping new Pump.Fun tokens:
-- **Monitor**: Subscribe to Pump.Fun program via Geyser GRPC for real-time updates
-- **Parse**: Extract mint information and calculate market cap from transactions
+- **Monitor**: Subscribe to Pump.Fun program via WebSocket RPC for real-time updates
+- **Parse**: Extract mint information and calculate market cap from transactions using real-time SOL prices
 - **Filter**: Only target tokens with market cap above $8,000
-- **Execute**: Build and submit buy transactions with optimized speed
+- **Execute**: Build and submit REAL Pump.Fun swap transactions with optimized speed
 
 ## 🏗️ Architecture
 
 ### Core Components
 
-1. **Config Management** (`config/`)
-   - Environment variable handling
+1. **Config Management** (`internal/config/`)
+   - Environment variable handling with `.env` support
    - Wallet key management
    - Network endpoint configuration
+   - Real-time SOL price integration
 
-2. **GRPC Client** (`grpc/`)
-   - Geyser subscription management
-   - Real-time transaction streaming
+2. **WebSocket Monitor** (`internal/monitor/`)
+   - Real-time transaction streaming via Solana WebSocket
+   - Pump.Fun program log subscription
    - Connection handling with retry logic
 
-3. **Transaction Parser** (`parser/`)
-   - Pump.Fun transaction parsing
-   - Market cap calculation
+3. **Transaction Parser** (`internal/parser/`)
+   - Real Pump.Fun transaction parsing using `tx-parser` library
+   - Market cap calculation from bonding curve data
    - Mint extraction and validation
 
-4. **Trading Engine** (`trader/`)
-   - Buy transaction construction
-   - Solana transaction building
-   - Transaction submission and confirmation
+4. **Trading Engine** (`internal/trader/`)
+   - Pump.Fun swap transaction construction
+   - Solana transaction building with proper PDA derivation
+   - Transaction submission and confirmation tracking
 
-5. **Monitoring & Logging** (`monitor/`)
-   - Performance metrics
-   - Success/failure tracking
-   - Structured logging
+5. **Price Service** (`internal/price/`)
+   - Real-time SOL price fetching from CoinGecko
+   - Thread-safe price updates every 5 minutes
+   - Accurate market cap calculations
 
 ### Data Flow
 
-Geyser GRPC Stream → Transaction Parser → Market Cap Filter → Trading Engine → Solana Network
-↓ ↓ ↓ ↓ ↓
-Real-time data Extract mint info Check ≥ $8k MC Build buy TX Submit & confirm
+WebSocket RPC Stream → Transaction Parser → Market Cap Filter → Trading Engine → Solana Network
+        ↓                     ↓                   ↓                    ↓              ↓
+   Real-time data      Extract REAL info    Check ≥ $8k MC      Build REAL TX   Submit & confirm
 
+### Key Features
+
+- ✅ **Real-time monitoring** of Pump.Fun program logs
+- ✅ **REAL transaction parsing** (no simulation/fake data)
+- ✅ **Live SOL price updates** for accurate market cap calculation
+- ✅ **Actual Pump.Fun swap transactions** (not placeholders)
+- ✅ **Graceful shutdown** with Ctrl+C support
+- ✅ **Simulation mode** for safe testing
+- ✅ **Production-ready** error handling and logging
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 - Go 1.21+
 - Solana wallet with SOL balance
-- Access to Helius Geyser GRPC and Rciesod download
+- Helius RPC endpoint access
+
+### Installation
+
+```bash
+# Clone and setup
+git clone <repository>
+cd golang-pumpfun-sniper
+go mod tidy
 
 # Configure your settings
+cp .env.example .env
 nano .env
-Create a `.env` file with the following variables:
+```
+
+Create a `.env` file with your configuration:
 
 ```env
 # Helius Endpoints
@@ -139,13 +160,6 @@ go build -o sniper cmd/main.go
 - Transaction trace logging
 - Performance metrics
 
-## 🔒 Security Considerations
-
-- Private keys handled securely with environment variables
-- No sensitive data in logs
-- Connection encryption for all network communications
-- Graceful error handling to prevent crashes
-
 ## 🛠️ Development Methodology
 
 ### Clean Code Principles
@@ -161,11 +175,34 @@ go build -o sniper cmd/main.go
 │ └── main.go # Application entry point
 ├── internal/
 │ ├── config/ # Configuration management
-│ ├── grpc/ # Geyser GRPC client
+│ ├── logger/ # Logging 
+│ ├── monitor/ # Metrics
 │ ├── parser/ # Transaction parsing
-│ ├── trader/ # Trading logic
-│ └── monitor/ # Metrics and logging
-└── tests/
-  ├── unit/ # Unit tests
-  └── integration/ #
+│ ├── price/ # Solana price update
+│ └── trader/ # Trading logic
+├── .env.example
+├── go.mod
+└── README.md
 ```
+
+
+### Testing
+
+```bash
+# Start with simulation mode
+go run cmd/main.go --simulate
+
+# Check logs for activity
+# Should see: Token parsing, market cap calculations, trade simulations
+```
+
+## 🔒 Security
+
+- Private keys stored securely in environment variables
+- No sensitive data in logs
+- Connection encryption for all network communications
+- Graceful shutdown prevents data corruption
+
+---
+
+**⚠️ Disclaimer**: This software is for educational purposes. Trading cryptocurrencies involves significant risk. Only use funds you can afford to lose.
