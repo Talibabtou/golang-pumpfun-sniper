@@ -99,10 +99,6 @@ func startSniper(ctx context.Context, cfg *config.Config) error {
 	}
 	defer pumpMonitor.Close()
 
-	if err := cfg.PriceService.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start price service: %w", err)
-	}
-
 	go func() {
 		if err := pumpMonitor.Start(ctx, rawTxChan); err != nil {
 			logrus.WithError(err).Error("Monitor failed")

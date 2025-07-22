@@ -67,7 +67,7 @@ func Load() (*Config, error) {
 	config.PrivateKey = getEnvRequired("PRIVATE_KEY")
 	
 	// Trading parameters with defaults
-	config.BuyAmountSOL = getEnvFloat("BUY_AMOUNT_SOL", 0.01)
+	config.BuyAmountSOL = getEnvFloat("BUY_AMOUNT_SOL", 0.001)
 	config.MinMarketCap = getEnvFloat("MIN_MARKET_CAP", 8000.0)
 	config.MaxSlippage = getEnvFloat("MAX_SLIPPAGE", 0.05)
 	

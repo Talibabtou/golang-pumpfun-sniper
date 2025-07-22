@@ -1,236 +1,276 @@
 // Package monitor provides real-time monitoring of Solana blockchain transactions
-// for the Pump.Fun program. It establishes WebSocket connections to track program
-// logs and fetches full transaction details for analysis.
+// for the Pump.Fun program using Yellowstone gRPC streaming.
 //
-// The monitor operates by:
-// 1. Subscribing to Pump.Fun program log mentions via WebSocket
-// 2. Fetching complete transaction data for each detected signature
-// 3. Forwarding raw transactions to the parser pipeline
-//
-// It handles connection failures gracefully with automatic reconnection
-// and provides detailed logging for monitoring and debugging.
+// This implementation uses proper Yellowstone gRPC protobuf definitions for
+// real-time streaming with manual event decoding to avoid bundle compatibility issues.
 package monitor
 
 import (
 	"context"
-	"encoding/json"
-	"strings"
+	"fmt"
 	"time"
 
 	"golang-pumpfun-sniper/internal/config"
 	"golang-pumpfun-sniper/internal/logger"
 	"golang-pumpfun-sniper/internal/parser"
-	"golang-pumpfun-sniper/internal/utils"
+
+	pb "github.com/rpcpool/yellowstone-grpc/examples/golang/proto"
 
 	"github.com/gagliardetto/solana-go"
-	"github.com/gagliardetto/solana-go/rpc"
-	"github.com/gagliardetto/solana-go/rpc/ws"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/encoding/gzip"
+	"google.golang.org/grpc/keepalive"
 )
 
-// PumpFunMonitor manages real-time monitoring of Pump.Fun program transactions
-// on the Solana blockchain. It maintains both RPC and WebSocket connections
-// to efficiently track new token launches and related activities.
-type PumpFunMonitor struct {
+// Monitor provides real-time monitoring using Yellowstone gRPC streaming
+type Monitor struct {
 	config         *config.Config
-	rpcClient      *rpc.Client
-	wsClient       *ws.Client
+	grpcConn       *grpc.ClientConn
+	geyserClient   pb.GeyserClient
 	pumpFunProgram solana.PublicKey
+	endpoint       string
+	token          string
 }
 
-// NewMonitor creates a new PumpFunMonitor instance with the provided configuration.
-// It initializes the RPC client and validates the Pump.Fun program ID.
-//
-// Returns an error if the program ID is invalid or RPC client creation fails.
-func NewMonitor(cfg *config.Config) (*PumpFunMonitor, error) {
-	pumpFunProgram, err := solana.PublicKeyFromBase58(cfg.PumpFunProgramID)
-	if err != nil {
-		return nil, err
-	}
+// tokenAuth implements gRPC credentials for Helius authentication
+type tokenAuth struct {
+	token string
+}
 
-	rpcClient := rpc.New(cfg.RPCEndpoint)
-
-	return &PumpFunMonitor{
-		config:         cfg,
-		rpcClient:      rpcClient,
-		pumpFunProgram: pumpFunProgram,
+func (t tokenAuth) GetRequestMetadata(ctx context.Context, uri ...string) (map[string]string, error) {
+	return map[string]string{
+		"x-token": t.token,
 	}, nil
 }
 
-// Start begins the monitoring process by establishing connections and subscribing
-// to Pump.Fun program logs. It first validates RPC connectivity, then establishes
-// a WebSocket connection for real-time log monitoring.
-//
-// The method runs continuously until the context is cancelled, automatically
-// handling connection failures with retry logic.
-func (m *PumpFunMonitor) Start(ctx context.Context, rawTxChan chan<- *parser.RawTransaction) error {
-	logrus.Info("🔌 Connecting to Solana RPC...")
-
-	_, err := m.rpcClient.GetHealth(ctx)
-	if err != nil {
-		return err
-	}
-	logger.LogConnection("Solana RPC", "connected")
-
-	if err := m.connectWebSocket(ctx); err != nil {
-		return err
-	}
-
-	return m.monitorLogs(ctx, rawTxChan)
+func (t tokenAuth) RequireTransportSecurity() bool {
+	return false
 }
 
-// connectWebSocket establishes a WebSocket connection to the Solana RPC endpoint
-// for real-time transaction monitoring. It converts HTTP(S) endpoints to their
-// WebSocket equivalents automatically.
-func (m *PumpFunMonitor) connectWebSocket(ctx context.Context) error {
-	logrus.Info("🔌 Connecting to Solana WebSocket...")
-	
-	wsEndpoint := convertHTTPToWebSocket(m.config.RPCEndpoint)
-	wsClient, err := ws.Connect(ctx, wsEndpoint)
-	if err != nil {
-		return err
+// NewMonitor creates a new Yellowstone gRPC monitor
+func NewMonitor(cfg *config.Config) (*Monitor, error) {
+	// Validate gRPC configuration
+	if cfg.GRPCEndpoint == "" || cfg.GRPCToken == "" {
+		return nil, fmt.Errorf("gRPC endpoint and token are required - no fallback available")
 	}
 
-	m.wsClient = wsClient
-	logger.LogConnection("Solana WebSocket", "connected")
+	pumpFunProgram, err := solana.PublicKeyFromBase58(cfg.PumpFunProgramID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pump fun program ID: %w", err)
+	}
+
+	monitor := &Monitor{
+		config:         cfg,
+		pumpFunProgram: pumpFunProgram,
+		endpoint:       cfg.GRPCEndpoint,
+		token:          cfg.GRPCToken,
+	}
+
+	logrus.Info("✅ Yellowstone gRPC monitor ready")
+	return monitor, nil
+}
+
+// Start begins Yellowstone gRPC streaming for Pump.Fun program transactions
+func (m *Monitor) Start(ctx context.Context, rawTxChan chan<- *parser.RawTransaction) error {
+	logrus.Info("🚀 Starting Yellowstone gRPC streaming for Pump.Fun events...")
+
+	// Establish gRPC connection
+	if err := m.connectYellowstone(ctx); err != nil {
+		return fmt.Errorf("failed to connect to Yellowstone gRPC: %w", err)
+	}
+
+	logger.LogConnection("Yellowstone gRPC", "connected")
+
+	// Start streaming Pump.Fun transactions
+	return m.streamPumpFunTransactions(ctx, rawTxChan)
+}
+
+// connectYellowstone establishes authenticated gRPC connection to Yellowstone
+func (m *Monitor) connectYellowstone(ctx context.Context) error {
+	// Setup connection parameters for optimal performance
+	kacp := keepalive.ClientParameters{
+		Time:                10 * time.Second,
+		Timeout:             5 * time.Second,
+		PermitWithoutStream: true,
+	}
+
+	// Configure gRPC options
+	opts := []grpc.DialOption{
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(kacp),
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(1024*1024*1024), // 1GB max message size
+			grpc.UseCompressor(gzip.Name),
+		),
+		grpc.WithPerRPCCredentials(tokenAuth{token: m.token}),
+	}
+
+	// Establish connection
+	conn, err := grpc.DialContext(ctx, m.endpoint, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to dial Yellowstone gRPC: %w", err)
+	}
+
+	m.grpcConn = conn
+	m.geyserClient = pb.NewGeyserClient(conn)
+	
+	logrus.Info("✅ Yellowstone gRPC connection established")
 	return nil
 }
 
-// monitorLogs continuously monitors Pump.Fun program logs through WebSocket
-// subscription. It implements automatic reconnection on failures with a
-// 5-second delay between retry attempts.
-//
-// The method runs until the context is cancelled or an unrecoverable error occurs.
-func (m *PumpFunMonitor) monitorLogs(ctx context.Context, rawTxChan chan<- *parser.RawTransaction) error {
-	logrus.Info("📡 Subscribing to Pump.Fun program logs...")
+// streamPumpFunTransactions subscribes to real-time Pump.Fun program transactions
+func (m *Monitor) streamPumpFunTransactions(ctx context.Context, rawTxChan chan<- *parser.RawTransaction) error {
+	logrus.Info("📡 Subscribing to Pump.Fun program transactions via Yellowstone...")
 
-	for {
-		select {
-		case <-ctx.Done():
-			logrus.Info("🛑 Context cancelled, stopping log monitoring")
-			return nil
-		default:
-			if err := m.subscribeAndListen(ctx, rawTxChan); err != nil {
-				logrus.WithError(err).Error("Subscription failed, retrying in 5 seconds...")
-				select {
-				case <-ctx.Done():
-					return nil
-				case <-time.After(5 * time.Second):
-					continue
-				}
-			}
-		}
+	// Create streaming subscription
+	stream, err := m.geyserClient.Subscribe(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create subscription stream: %w", err)
+	}
+
+	// Build subscription request for Pump.Fun transactions
+	req := m.buildPumpFunSubscriptionRequest()
+	
+	// Send subscription request
+	if err := stream.Send(req); err != nil {
+		return fmt.Errorf("failed to send subscription request: %w", err)
+	}
+
+	logrus.Info("⚡ Yellowstone streaming active - monitoring Pump.Fun transactions...")
+
+	// Start receiving stream data
+	return m.receiveStreamData(ctx, stream, rawTxChan)
+}
+
+// buildPumpFunSubscriptionRequest creates a subscription request for Pump.Fun transactions
+func (m *Monitor) buildPumpFunSubscriptionRequest() *pb.SubscribeRequest {
+	// Subscribe to transactions that include the Pump.Fun program
+	transactions := make(map[string]*pb.SubscribeRequestFilterTransactions)
+	transactions["pumpfun"] = &pb.SubscribeRequestFilterTransactions{
+		Vote:           &[]bool{false}[0], // No vote transactions
+		Failed:         &[]bool{false}[0], // No failed transactions  
+		AccountInclude: []string{m.config.PumpFunProgramID}, // Only Pump.Fun program
+	}
+
+	// Set commitment level to confirmed for balance between speed and reliability
+	commitment := pb.CommitmentLevel_CONFIRMED
+
+	return &pb.SubscribeRequest{
+		Transactions: transactions,
+		Commitment:   &commitment,
 	}
 }
 
-// subscribeAndListen establishes a log subscription for the Pump.Fun program
-// and continuously listens for new transaction signatures. Each received
-// signature triggers a full transaction fetch and forwarding to the parser.
-//
-// The subscription uses the "processed" commitment level for fastest detection
-// of new transactions.
-func (m *PumpFunMonitor) subscribeAndListen(ctx context.Context, rawTxChan chan<- *parser.RawTransaction) error {
-	sub, err := m.wsClient.LogsSubscribeMentions(m.pumpFunProgram, rpc.CommitmentProcessed)
-	if err != nil {
-		return err
-	}
-	defer sub.Unsubscribe()
-
-	logrus.Info("✅ Successfully subscribed to Pump.Fun logs")
-
+// receiveStreamData receives and processes streaming data from Yellowstone
+func (m *Monitor) receiveStreamData(ctx context.Context, stream pb.Geyser_SubscribeClient, rawTxChan chan<- *parser.RawTransaction) error {
 	for {
 		select {
 		case <-ctx.Done():
+			logrus.Info("🛑 Yellowstone streaming stopping...")
 			return nil
 		default:
-			result, err := sub.Recv(ctx)
+			// Receive update from stream
+			update, err := stream.Recv()
 			if err != nil {
-				select {
-				case <-ctx.Done():
-					return nil
-				default:
-					return err
+				return fmt.Errorf("failed to receive stream update: %w", err)
+			}
+
+			// Process each transaction in the update
+			if txUpdate := update.GetTransaction(); txUpdate != nil {
+				if err := m.processTransactionUpdate(ctx, txUpdate, rawTxChan); err != nil {
+					logrus.WithError(err).Warn("Failed to process transaction update")
 				}
 			}
 
-			m.sendRawTransaction(ctx, result.Value.Signature, rawTxChan)
+			// Handle ping/pong to keep connection alive
+			if ping := update.GetPing(); ping != nil {
+				logrus.Debug("📡 Received ping from Yellowstone")
+				// Send pong response
+				pongReq := &pb.SubscribeRequest{
+					Ping: &pb.SubscribeRequestPing{Id: 1},
+				}
+				if err := stream.Send(pongReq); err != nil {
+					logrus.WithError(err).Warn("Failed to send pong response")
+				}
+			}
 		}
 	}
 }
 
-// sendRawTransaction fetches the complete transaction data for a given signature
-// and forwards it to the parser pipeline. It uses the "confirmed" commitment
-// level to ensure transaction data stability while maintaining low latency.
-//
-// Failed transaction fetches are logged but don't stop the monitoring process.
-// The channel send is non-blocking to prevent pipeline stalls.
-func (m *PumpFunMonitor) sendRawTransaction(ctx context.Context, signature solana.Signature, rawTxChan chan<- *parser.RawTransaction) {
-	logrus.WithField("signature", signature.String()[:8]+"...").Info("📥 Processing Pump.Fun transaction")
-	
-	version := uint64(0)
-	tx, err := m.rpcClient.GetTransaction(ctx, signature, &rpc.GetTransactionOpts{
-		MaxSupportedTransactionVersion: &version,
-		Commitment:                     rpc.CommitmentConfirmed,
-		Encoding:                       solana.EncodingBase64,
-	})
-	
-	if err != nil {
-		sanitizedError := utils.SanitizeError(err, m.config.RPCEndpoint)
-		logrus.WithFields(logrus.Fields{
-			"signature": signature.String()[:8] + "...",
-			"error":     sanitizedError,
-		}).Warn("⚠️ Failed to get transaction")
-		return
-	}
-	
-	if tx == nil {
-		logrus.Info("Transaction is nil, skipping")
-		return
+// processTransactionUpdate processes a single transaction update from Yellowstone
+func (m *Monitor) processTransactionUpdate(ctx context.Context, txUpdate *pb.SubscribeUpdateTransaction, rawTxChan chan<- *parser.RawTransaction) error {
+	if txUpdate == nil || txUpdate.Transaction == nil {
+		return nil
 	}
 
-	_, err = json.Marshal([]*rpc.GetTransactionResult{tx})
-	if err != nil {
-		logrus.WithError(err).Info("Failed to marshal transaction")
-		return
+	tx := txUpdate.Transaction
+	signature := m.extractSignatureFromUpdate(tx)
+	
+	if signature == "" {
+		return fmt.Errorf("no signature found in transaction")
 	}
 
+	logrus.WithFields(logrus.Fields{
+		"signature": signature[:8] + "...",
+		"slot":      txUpdate.Slot,
+		"is_vote":   tx.IsVote,
+	}).Info("🎯 Pump.Fun transaction detected via Yellowstone")
+
+	// Convert Yellowstone transaction to our format for manual parsing
 	rawTx := &parser.RawTransaction{
-		Signature:   signature.String(),
-		Transaction: tx,
+		Signature:   signature,
+		Transaction: m.convertYellowstoneTransaction(txUpdate),
 	}
 
+	// Send to parser
 	select {
 	case rawTxChan <- rawTx:
-		logrus.WithField("signature", signature.String()[:8]+"...").Debug("📤 Sent to parser")
+		logrus.WithField("signature", signature[:8]+"...").Debug("📤 Sent Yellowstone transaction to parser")
+	case <-time.After(10 * time.Millisecond):
+		logrus.Warn("🚫 Raw transaction channel full, dropping Yellowstone transaction")
 	case <-ctx.Done():
-		return
-	default:
-		logrus.Warn("🚫 Raw transaction channel full, dropping transaction")
+		return nil
 	}
-}
 
-// Close gracefully shuts down the monitor by closing the WebSocket connection.
-// It should be called when the monitor is no longer needed to free resources.
-func (m *PumpFunMonitor) Close() error {
-	if m.wsClient != nil {
-		logrus.Info("🔌 Closing WebSocket connection")
-		m.wsClient.Close()
-	}
 	return nil
 }
 
-// convertHTTPToWebSocket converts HTTP(S) RPC endpoints to their WebSocket
-// equivalents by replacing the protocol scheme. This enables real-time
-// data streaming from the same endpoint used for RPC calls.
-//
-// Examples:
-//   - "https://api.mainnet-beta.solana.com" -> "wss://api.mainnet-beta.solana.com"
-//   - "http://localhost:8899" -> "ws://localhost:8899"
-func convertHTTPToWebSocket(httpEndpoint string) string {
-	if strings.HasPrefix(httpEndpoint, "https://") {
-		return "wss://" + httpEndpoint[8:]
-	} else if strings.HasPrefix(httpEndpoint, "http://") {
-		return "ws://" + httpEndpoint[7:]
+// extractSignatureFromUpdate extracts the signature from a Yellowstone transaction update
+func (m *Monitor) extractSignatureFromUpdate(tx *pb.SubscribeUpdateTransactionInfo) string {
+	if tx == nil || len(tx.Signature) == 0 {
+		return ""
 	}
-	return httpEndpoint
+	
+	// Convert binary signature to base58 string manually
+	// Solana signatures are 64 bytes, encoded as base58
+	if len(tx.Signature) != 64 {
+		logrus.Warn("Invalid signature length")
+		return ""
+	}
+	
+	// Create signature from bytes and convert to string
+	var sigBytes [64]byte
+	copy(sigBytes[:], tx.Signature)
+	signature := solana.Signature(sigBytes)
+	
+	return signature.String()
+}
+
+// convertYellowstoneTransaction converts Yellowstone transaction format to parser format
+// This allows us to reuse our existing manual parser without changes
+func (m *Monitor) convertYellowstoneTransaction(txUpdate *pb.SubscribeUpdateTransaction) interface{} {
+	// Pass the Yellowstone transaction directly to the parser
+	// The parser will handle the conversion internally
+	return txUpdate
+}
+
+// Close cleanup resources
+func (m *Monitor) Close() error {
+	if m.grpcConn != nil {
+		logrus.Info("🔌 Closing Yellowstone gRPC connection")
+		return m.grpcConn.Close()
+	}
+	return nil
 }
