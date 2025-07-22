@@ -159,6 +159,7 @@ go build -o sniper cmd/main.go
 
 ### Project Structure
 
+```
 ├── cmd/
 │ └── main.go # Application entry point
 ├── internal/
@@ -176,4 +177,4 @@ go build -o sniper cmd/main.go
 │ └── docker/ # Docker configuration
 └── scripts/
 └── setup.sh # Setup scripts
-
+```
