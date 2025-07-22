@@ -1,3 +1,15 @@
+// Package parser provides transaction parsing functionality for the Pump.Fun sniper bot.
+// It analyzes Solana blockchain transactions to identify token launches and calculate
+// market caps for automated trading decisions.
+//
+// The parser operates by:
+// 1. Converting RPC transaction data to JSON format
+// 2. Using the tx-parser library to extract Pump.Fun program actions
+// 3. Calculating market cap and token metrics from transaction data
+// 4. Returning structured token launch data for trading evaluation
+//
+// It handles various transaction formats and provides detailed logging
+// for debugging and monitoring purposes.
 package parser
 
 import (
@@ -14,6 +26,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// TokenLaunchData represents the structured data extracted from a Pump.Fun token launch transaction.
+// It contains all relevant information needed for trading decisions, including market cap calculations,
+// token reserves, and associated account addresses.
 type TokenLaunchData struct {
 	Mint                  string  `json:"mint"`
 	MarketCapUSD          float64 `json:"market_cap_usd"`
@@ -28,16 +43,25 @@ type TokenLaunchData struct {
 	Timestamp             int64   `json:"timestamp"`
 }
 
+// PumpFunParser handles the parsing of Solana transactions to extract Pump.Fun program data.
+// It uses the tx-parser library to analyze transaction instructions and calculate token metrics.
 type PumpFunParser struct {
 	config *config.Config
 }
 
+// NewPumpFunParser creates a new PumpFunParser instance with the provided configuration.
+// The parser uses the configuration to access current SOL prices and program IDs.
 func NewPumpFunParser(cfg *config.Config) *PumpFunParser {
 	return &PumpFunParser{
 		config: cfg,
 	}
 }
 
+// ParseTransaction analyzes a raw Solana transaction and extracts token launch data
+// if it contains relevant Pump.Fun program instructions.
+//
+// Returns nil if the transaction is not a Pump.Fun token launch, or an error
+// if parsing fails. Success returns TokenLaunchData with calculated market cap.
 func (p *PumpFunParser) ParseTransaction(rawTx *RawTransaction) (*TokenLaunchData, error) {
 	jsonData, err := p.convertRPCToJSON(rawTx.Transaction)
 	if err != nil {
@@ -52,6 +76,8 @@ func (p *PumpFunParser) ParseTransaction(rawTx *RawTransaction) (*TokenLaunchDat
 	return p.extractTokenLaunchData(actions, parsedResult, rawTx.Signature)
 }
 
+// convertRPCToJSON converts RPC transaction data to JSON format required by the tx-parser library.
+// It wraps the transaction and metadata in the expected structure for parsing.
 func (p *PumpFunParser) convertRPCToJSON(rpcTx *rpc.GetTransactionResult) ([]byte, error) {
 	if rpcTx == nil {
 		return nil, fmt.Errorf("transaction is nil")
@@ -70,6 +96,10 @@ func (p *PumpFunParser) convertRPCToJSON(rpcTx *rpc.GetTransactionResult) ([]byt
 	return json.Marshal(wrapper)
 }
 
+// parseUsingPumpScanMethod processes JSON transaction data using the tx-parser library
+// to extract Pump.Fun program actions and account information.
+//
+// Returns the parsed actions, account list, and any parsing errors encountered.
 func (p *PumpFunParser) parseUsingPumpScanMethod(jsonData []byte) ([]types.Action, *types.ParsedResult, error) {
 	var txs types.RawTxs
 	err := json.Unmarshal(jsonData, &txs)
@@ -97,7 +127,7 @@ func (p *PumpFunParser) parseUsingPumpScanMethod(jsonData []byte) ([]types.Actio
 
 	for _, instr := range allInstructions {
 		programID := parsedResult.AccountList[instr.ProgramIDIndex]
-		if programID == p.config.PumpFunProgramID { // ← Fixed: use PumpFunProgramID
+		if programID == p.config.PumpFunProgramID {
 			action, err := pumpfunParser.InstructionRouter(&parsedResult, instr)
 			if err == nil {
 				actions = append(actions, action)
@@ -110,6 +140,10 @@ func (p *PumpFunParser) parseUsingPumpScanMethod(jsonData []byte) ([]types.Actio
 	return actions, &parsedResult, nil
 }
 
+// extractTokenLaunchData processes parsed actions and account data to create
+// a TokenLaunchData structure with calculated market cap and token metrics.
+//
+// Returns an error if no Pump.Fun actions are found or if account data is insufficient.
 func (p *PumpFunParser) extractTokenLaunchData(actions []types.Action, parsedResult *types.ParsedResult, signature string) (*TokenLaunchData, error) {
 	if len(actions) == 0 {
 		return nil, fmt.Errorf("no Pump.Fun actions found")
@@ -143,6 +177,10 @@ func (p *PumpFunParser) extractTokenLaunchData(actions []types.Action, parsedRes
 	return tokenData, nil
 }
 
+// calculateMarketCap computes the market capitalization based on virtual token and SOL reserves.
+// Uses the bonding curve formula to determine token price and total market value.
+//
+// Returns 0 if token reserves are zero to avoid division by zero errors.
 func (p *PumpFunParser) calculateMarketCap(virtualTokenReserves, virtualSolReserves uint64) float64 {
 	if virtualTokenReserves == 0 {
 		return 0
@@ -163,12 +201,16 @@ func (p *PumpFunParser) calculateMarketCap(virtualTokenReserves, virtualSolReser
 	return marketCap
 }
 
+// estimateMarketCap provides a fallback market cap estimation when exact calculations
+// are not possible. Uses current SOL price to generate a reasonable estimate.
 func (p *PumpFunParser) estimateMarketCap() float64 {
 	solPrice := p.config.GetCurrentSOLPrice()
 	estimatedMC := 15000.0 + (solPrice * 10.0)
 	return estimatedMC
 }
 
+// RawTransaction represents a raw Solana transaction received from the monitor.
+// Contains the transaction signature and full RPC transaction data for parsing.
 type RawTransaction struct {
 	Signature   string
 	Transaction *rpc.GetTransactionResult

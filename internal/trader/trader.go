@@ -1,3 +1,15 @@
+// Package trader implements the trading component of the Pump.Fun sniper bot.
+// It handles the execution of buy orders for qualifying token launches on Solana
+// through the Pump.Fun program, with support for both live trading and simulation modes.
+//
+// The trader performs the following key functions:
+// - Validates wallet setup and balance requirements
+// - Constructs and signs Pump.Fun swap transactions
+// - Executes real trades or simulates them based on configuration
+// - Tracks transaction confirmations and provides detailed logging
+//
+// In simulation mode, trades are logged but not executed, allowing for safe testing.
+// In live mode, real SOL is spent to purchase tokens that meet market cap criteria.
 package trader
 
 import (
@@ -16,6 +28,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// Trader handles the execution of token purchases on Pump.Fun.
+// It manages wallet interactions, transaction building, and trade execution
+// with support for both live trading and simulation modes.
 type Trader struct {
 	config     *config.Config
 	rpcClient  *rpc.Client
@@ -26,6 +41,9 @@ type Trader struct {
 	feeRecipient   solana.PublicKey
 }
 
+// TradeResult contains the outcome and metrics of a trade execution.
+// It provides detailed information about transaction success, timing,
+// and amounts for logging and monitoring purposes.
 type TradeResult struct {
 	Success     bool
 	Signature   string
@@ -35,6 +53,12 @@ type TradeResult struct {
 	Timestamp   time.Time
 }
 
+// NewTrader creates and initializes a new Trader instance.
+// It validates all required configuration parameters, establishes RPC connection,
+// and verifies wallet setup including balance requirements.
+//
+// Returns an error if any validation fails, ensuring the trader is ready
+// for immediate use upon successful creation.
 func NewTrader(cfg *config.Config) (*Trader, error) {
 	privateKey, err := solana.PrivateKeyFromBase58(cfg.PrivateKey)
 	if err != nil {
@@ -75,6 +99,9 @@ func NewTrader(cfg *config.Config) (*Trader, error) {
 	return trader, nil
 }
 
+// validateSetup verifies the trader's configuration and readiness for trading.
+// It checks RPC connectivity, wallet balance, and ensures sufficient funds
+// are available for the configured buy amount plus transaction fees.
 func (t *Trader) validateSetup(ctx context.Context) error {
 	_, err := t.rpcClient.GetHealth(ctx)
 	if err != nil {
@@ -104,6 +131,12 @@ func (t *Trader) validateSetup(ctx context.Context) error {
 	return nil
 }
 
+// ExecuteBuy executes a buy order for the specified token launch.
+// In simulation mode, it logs the trade without executing it.
+// In live mode, it builds and sends a real Pump.Fun swap transaction.
+//
+// Returns a TradeResult containing execution details, timing metrics,
+// and success/failure status for monitoring and logging.
 func (t *Trader) ExecuteBuy(ctx context.Context, tokenLaunch *parser.TokenLaunchData) *TradeResult {
 	startTime := time.Now()
 	
@@ -126,6 +159,9 @@ func (t *Trader) ExecuteBuy(ctx context.Context, tokenLaunch *parser.TokenLaunch
 	return t.executeRealPumpFunBuy(ctx, tokenLaunch, result)
 }
 
+// simulateBuy simulates a buy order without executing a real transaction.
+// It provides realistic timing and logs the trade details as if it were
+// executed, useful for testing and strategy development.
 func (t *Trader) simulateBuy(tokenLaunch *parser.TokenLaunchData, result *TradeResult) *TradeResult {
 	time.Sleep(50 * time.Millisecond)
 
@@ -143,6 +179,9 @@ func (t *Trader) simulateBuy(tokenLaunch *parser.TokenLaunchData, result *TradeR
 	return result
 }
 
+// executeRealPumpFunBuy executes a real buy transaction on the Pump.Fun program.
+// It builds a complete swap transaction with associated token account creation,
+// signs it with the trader's wallet, and submits it to the Solana network.
 func (t *Trader) executeRealPumpFunBuy(ctx context.Context, tokenLaunch *parser.TokenLaunchData, result *TradeResult) *TradeResult {
 	mintPubkey, err := solana.PublicKeyFromBase58(tokenLaunch.Mint)
 	if err != nil {
@@ -197,6 +236,9 @@ func (t *Trader) executeRealPumpFunBuy(ctx context.Context, tokenLaunch *parser.
 	return result
 }
 
+// buildRealPumpFunSwap constructs a complete Pump.Fun swap transaction.
+// It creates instructions for associated token account creation and the swap itself,
+// derives the bonding curve PDA, and builds a ready-to-sign transaction.
 func (t *Trader) buildRealPumpFunSwap(ctx context.Context, mintPubkey solana.PublicKey, tokenLaunch *parser.TokenLaunchData) (*solana.Transaction, solana.PublicKey, error) {
 	recentBlockhash, err := t.rpcClient.GetLatestBlockhash(ctx, rpc.CommitmentFinalized)
 	if err != nil {
@@ -255,6 +297,9 @@ func (t *Trader) buildRealPumpFunSwap(ctx context.Context, mintPubkey solana.Pub
 	return tx, bondingCurve, nil
 }
 
+// findBondingCurveAccount derives the bonding curve Program Derived Address (PDA)
+// for the specified token mint. This PDA is required for Pump.Fun swap transactions
+// and follows the program's standard derivation pattern.
 func (t *Trader) findBondingCurveAccount(mint solana.PublicKey) (solana.PublicKey, error) {
 	seeds := [][]byte{
 		[]byte("bonding-curve"),
@@ -269,6 +314,9 @@ func (t *Trader) findBondingCurveAccount(mint solana.PublicKey) (solana.PublicKe
 	return bondingCurve, nil
 }
 
+// buildSwapInstructionData creates the instruction data for a Pump.Fun swap.
+// It encodes the buy instruction discriminator, SOL amount, and minimum token
+// amount into the binary format expected by the Pump.Fun program.
 func (t *Trader) buildSwapInstructionData(solAmount, minTokens uint64) []byte {
 	data := make([]byte, 24)
 	
@@ -288,6 +336,9 @@ func (t *Trader) buildSwapInstructionData(solAmount, minTokens uint64) []byte {
 	return data
 }
 
+// trackConfirmation monitors a submitted transaction for confirmation.
+// It polls the RPC for transaction status and logs updates until confirmed
+// or timeout. Runs asynchronously to avoid blocking trade execution.
 func (t *Trader) trackConfirmation(ctx context.Context, signature solana.Signature) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -330,6 +381,9 @@ func (t *Trader) trackConfirmation(ctx context.Context, signature solana.Signatu
 	}
 }
 
+// GetStats returns current trader statistics and configuration.
+// Provides sanitized information suitable for logging and monitoring,
+// excluding sensitive data like private keys.
 func (t *Trader) GetStats() map[string]interface{} {
 	return map[string]interface{}{
 		"wallet":           utils.SanitizeWalletAddress(t.publicKey.String()),

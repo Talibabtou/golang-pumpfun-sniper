@@ -143,7 +143,7 @@ func (c *Config) LogConfig() {
 	}).Info("📋 Configuration loaded")
 }
 
-// Helper functions for environment variable handling
+// Helper functions
 
 func getEnvRequired(key string) string {
 	value := os.Getenv(key)

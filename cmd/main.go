@@ -1,3 +1,14 @@
+// Package main implements a Pump.Fun sniper bot that monitors Solana blockchain
+// for new token launches and executes automated trades based on configurable criteria.
+//
+// The bot operates in three main stages:
+// 1. Monitor: Subscribes to Pump.Fun program logs via WebSocket
+// 2. Parser: Analyzes transactions to identify token launches and calculate market caps
+// 3. Trader: Executes buy orders for tokens meeting minimum market cap requirements
+//
+// Usage:
+//   go run cmd/main.go                    # Live trading mode
+//   go run cmd/main.go --simulate         # Simulation mode
 package main
 
 import (
@@ -18,22 +29,21 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// main is the entry point of the Pump.Fun sniper bot.
+// It handles command-line flags, configuration loading, logging setup,
+// and orchestrates the startup of all bot components.
 func main() {
-	// Parse flags
 	simulate := flag.Bool("simulate", false, "Simulation mode (no real trades)")
 	flag.Parse()
 
-	// Load config
 	cfg, err := config.Load()
 	if err != nil {
 		logrus.Fatalf("Failed to load config: %v", err)
 	}
 	cfg.SimulateMode = *simulate
 
-	// Setup logging
 	logger.Setup(cfg.LogLevel)
 	
-	// Enhanced startup message
 	if cfg.SimulateMode {
 		logrus.Info("🧪 Starting Pump.Fun Sniper Bot in SIMULATION MODE")
 		logrus.Info("📊 Bot will monitor and parse token launches but NOT execute real trades")
@@ -45,10 +55,8 @@ func main() {
 	
 	logrus.Info("🔍 Monitoring Pump.Fun program for new token launches...")
 
-	// Create context
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -58,12 +66,10 @@ func main() {
 		cancel()
 	}()
 
-	// Start price service FIRST
 	if err := cfg.PriceService.Start(ctx); err != nil {
 		logrus.Fatalf("Failed to start price service: %v", err)
 	}
 
-	// Start the sniper pipeline
 	if err := startSniper(ctx, cfg); err != nil {
 		logrus.Fatalf("Failed to start sniper: %v", err)
 	}
@@ -75,41 +81,51 @@ func main() {
 	logrus.Info("✅ Shutdown complete")
 }
 
+// startSniper initializes and starts the main sniper pipeline components.
+// It creates communication channels between monitor, parser, and trader,
+// then starts each component in separate goroutines.
+//
+// The pipeline flow:
+// Monitor (WebSocket) -> RawTransaction -> Parser -> TokenLaunchData -> Trader
+//
+// Returns an error if any component fails to initialize.
 func startSniper(ctx context.Context, cfg *config.Config) error {
-	// Increase channel buffers for high-volume trading
 	rawTxChan := make(chan *parser.RawTransaction, 500)
 	tokenChan := make(chan *parser.TokenLaunchData, 100)
 
-	// Start monitor
 	pumpMonitor, err := monitor.NewMonitor(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create monitor: %w", err)
 	}
 	defer pumpMonitor.Close()
 
-	// Start price service
 	if err := cfg.PriceService.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start price service: %w", err)
 	}
 
-	// Start monitor
 	go func() {
 		if err := pumpMonitor.Start(ctx, rawTxChan); err != nil {
 			logrus.WithError(err).Error("Monitor failed")
 		}
 	}()
 
-	// Start parser
 	pumpParser := parser.NewPumpFunParser(cfg)
 	go startParser(ctx, rawTxChan, tokenChan, pumpParser, cfg)
 
-	// Start trader
 	go startTrader(ctx, tokenChan, cfg)
 
 	logrus.Info("🚀 Sniper pipeline started: Monitor → Parser → Trader")
 	return nil
 }
 
+// startParser processes raw transactions from the monitor and extracts
+// token launch data for qualifying Pump.Fun transactions.
+//
+// It continuously reads from rawTxChan, parses each transaction,
+// and forwards valid token launches to tokenChan for trading evaluation.
+//
+// The parser tracks transaction count and provides detailed logging
+// for debugging and monitoring purposes.
 func startParser(ctx context.Context, rawTxChan <-chan *parser.RawTransaction, tokenChan chan<- *parser.TokenLaunchData, pumpParser *parser.PumpFunParser, cfg *config.Config) {
 	defer close(tokenChan)
 	
@@ -152,7 +168,6 @@ func startParser(ctx context.Context, rawTxChan <-chan *parser.RawTransaction, t
 				"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
 			}).Info("✅ Token successfully parsed!")
 
-			// Send to trader
 			select {
 			case tokenChan <- tokenLaunch:
 				logger.LogTokenParsed(tokenLaunch.Mint, tokenLaunch.MarketCapUSD, cfg.GetCurrentSOLPrice())
@@ -165,8 +180,16 @@ func startParser(ctx context.Context, rawTxChan <-chan *parser.RawTransaction, t
 	}
 }
 
+// startTrader evaluates parsed token launches and executes buy orders
+// for tokens that meet the configured minimum market cap requirements.
+//
+// In simulation mode, it logs what trades would be executed without
+// actually performing them. In live mode, it executes real trades
+// and reports success/failure with detailed metrics.
+//
+// The trader automatically falls back to simulation mode if trader
+// initialization fails, ensuring the bot continues monitoring.
 func startTrader(ctx context.Context, tokenChan <-chan *parser.TokenLaunchData, cfg *config.Config) {
-	// Only create trader instance if not in simulation mode
 	var traderInstance *trader.Trader
 	var err error
 	
@@ -174,7 +197,7 @@ func startTrader(ctx context.Context, tokenChan <-chan *parser.TokenLaunchData, 
 		traderInstance, err = trader.NewTrader(cfg)
 		if err != nil {
 			logrus.WithError(err).Error("Failed to create trader - running in monitor-only mode")
-			cfg.SimulateMode = true // Fallback to simulation
+			cfg.SimulateMode = true
 		}
 	}
 
@@ -189,7 +212,6 @@ func startTrader(ctx context.Context, tokenChan <-chan *parser.TokenLaunchData, 
 				return
 			}
 			
-			// Check if it meets criteria
 			if tokenLaunch.MarketCapUSD < cfg.MinMarketCap {
 				logrus.WithFields(logrus.Fields{
 					"mint":         tokenLaunch.Mint[:8] + "...",
@@ -199,7 +221,6 @@ func startTrader(ctx context.Context, tokenChan <-chan *parser.TokenLaunchData, 
 				continue
 			}
 
-			// Log eligible token
 			logrus.WithFields(logrus.Fields{
 				"mint":       tokenLaunch.Mint[:8] + "...",
 				"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
@@ -207,14 +228,12 @@ func startTrader(ctx context.Context, tokenChan <-chan *parser.TokenLaunchData, 
 			}).Info("🎯 Token eligible for trading!")
 
 			if cfg.SimulateMode {
-				// Simulation mode: just log what would happen
 				logrus.WithFields(logrus.Fields{
 					"mint":       tokenLaunch.Mint[:8] + "...",
 					"market_cap": logger.FormatMarketCap(tokenLaunch.MarketCapUSD),
 					"would_buy":  fmt.Sprintf("%.3f SOL", cfg.BuyAmountSOL),
 				}).Info("📝 [SIMULATION] Would execute buy order")
 			} else {
-				// Real trading mode: execute the trade
 				result := traderInstance.ExecuteBuy(ctx, tokenLaunch)
 				
 				if result.Success {
