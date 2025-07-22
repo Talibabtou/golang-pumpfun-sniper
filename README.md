@@ -53,31 +53,31 @@ Real-time data Extract mint info Check ≥ $8k MC Build buy TX Submit & confirm
 - Solana wallet with SOL balance
 - Access to Helius Geyser GRPC and Rciesod download
 
-#emplate
-cp .env. Copy environment template
-cp .env.nv
-
-# Configureyour settings
+# Configure your settings
 nano .env
 Create a `.env` file with the following variables:
 
 ```env
 # Helius Endpoints
-GRPC_ENDPOINT=pomaded-lithotomies-xfbhnqagbt-dedicated-bypass.helius-rpc.com:2052
-GRPC_TOKEN=c64985b5-6ff0-4a6c-8ee2-2daf72546f39
-RPC_ENDPOINT=https://pomaded-lithotomies-xfbhnqagbt-dedicated.helius-rpc.com/?api-key=37ba4475-8fa3-4491-875f-758894981943
+GRPC_ENDPOINT=grpc_endpoint
+GRPC_TOKEN=grpc_token
+RPC_ENDPOINT=rpc_endpoint
 
 # Wallet Configuration
-PRIVATE_KEY=your_base58_encoded_private_key_here
+PRIVATE_KEY=private_key
 
 # Trading Parameters
-BUY_AMOUNT_SOL=0.01
+BUY_AMOUNT_SOL=0.001
 MIN_MARKET_CAP=8000
 MAX_SLIPPAGE=0.05
 
 # Performance Settings
 MAX_RETRIES=3
 TIMEOUT_SECONDS=10
+LOG_LEVEL=info
+
+# Pump.Fun Program ID
+PUMP_FUN_PROGRAM_ID=6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
 ```
 
 ### Running the Bot
@@ -88,9 +88,6 @@ go run cmd/main.go
 
 # Run in simulation mode (no actual trades)
 go run cmd/main.go --simulate
-
-# Run tests
-go test ./...
 
 # Build binary
 go build -o sniper cmd/main.go
@@ -168,13 +165,7 @@ go build -o sniper cmd/main.go
 │ ├── parser/ # Transaction parsing
 │ ├── trader/ # Trading logic
 │ └── monitor/ # Metrics and logging
-├── pkg/
-│ └── pumpfun/ # Pump.Fun specific utilities
-├── tests/
-│ ├── unit/ # Unit tests
-│ └── integration/ # Integration tests
-├── deployments/
-│ └── docker/ # Docker configuration
-└── scripts/
-└── setup.sh # Setup scripts
+└── tests/
+  ├── unit/ # Unit tests
+  └── integration/ #
 ```
